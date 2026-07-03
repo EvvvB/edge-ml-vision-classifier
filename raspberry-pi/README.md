@@ -22,6 +22,30 @@ curl -X POST http://127.0.0.1:8000/detections \
 
 The server saves images under `raspberry-pi/uploads/` and metadata JSON files under `raspberry-pi/metadata/`. Both files share the same generated `image_id`.
 
+## Model weights
+
+Model weights are stored locally under `app/inference/models/` and ignored by Git.
+
+```bash
+mkdir -p app/inference/models
+curl -fL https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26m.pt \
+  -o app/inference/models/yolo26m.pt
+```
+
+Run a quick prediction with the local model:
+
+```bash
+python app/inference/test_model.py uploads/example.jpg --save
+```
+
+Optional model commands:
+
+```bash
+python app/inference/test_model.py --val
+python app/inference/test_model.py --export-onnx
+python app/inference/test_model.py --train-coco8 --epochs 100
+```
+
 ## Project structure
 
 ```text

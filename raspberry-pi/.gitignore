@@ -2,3 +2,7 @@ uploads/
 metadata/
 __pycache__/
 .venv/
+app/inference/models/
+app/inference/runs/
+app/inference/.ultralytics/
+app/inference/.matplotlib/
