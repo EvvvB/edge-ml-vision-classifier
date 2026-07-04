@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import argparse
-import os
+import sys
 from pathlib import Path
 
+PROJECT_DIR = Path(__file__).resolve().parents[2]
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
 
-INFERENCE_DIR = Path(__file__).resolve().parent
-DEFAULT_MODEL_PATH = INFERENCE_DIR / "models" / "yolo26m.pt"
-RUNS_DIR = INFERENCE_DIR / "runs"
-
-os.environ.setdefault("YOLO_CONFIG_DIR", str(INFERENCE_DIR / ".ultralytics"))
-os.environ.setdefault("MPLCONFIGDIR", str(INFERENCE_DIR / ".matplotlib"))
-
-from ultralytics import YOLO
+from app.inference.model import DEFAULT_MODEL_PATH, RUNS_DIR, load_model, predict_image
 
 
 def parse_args() -> argparse.Namespace:
@@ -74,7 +70,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    model = YOLO(args.model)
+    model = load_model(args.model)
 
     if args.train_coco8:
         train_results = model.train(
@@ -87,15 +83,21 @@ def main() -> None:
         print(train_results)
 
     if args.image:
-        results = model(
+        detections = predict_image(
             args.image,
+            model_path=args.model,
             imgsz=args.imgsz,
             device=args.device,
             save=args.save,
-            project=str(RUNS_DIR),
         )
-        print(results[0].summary())
+        print(detections)
         if args.show:
+            results = model(
+                args.image,
+                imgsz=args.imgsz,
+                device=args.device,
+                save=args.save,
+            )
             results[0].show()
 
     if args.val:
