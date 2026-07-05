@@ -8,6 +8,7 @@ from uuid import uuid4
 from fastapi import HTTPException, UploadFile
 
 from app.config import settings
+from app.inference.model import predict_image
 from app.storage.filesystem import save_upload
 
 
@@ -30,6 +31,7 @@ async def receive_detection_upload(
         suffix=suffix,
         metadata=parsed_metadata,
     )
+    detections = predict_image(image_path)
 
     return detection_response(
         image=image,
@@ -37,6 +39,7 @@ async def receive_detection_upload(
         image_path=image_path,
         metadata_path=metadata_path,
         parsed_metadata=parsed_metadata,
+        detections=detections,
     )
 
 
@@ -71,6 +74,7 @@ def detection_response(
     image_path: Path,
     metadata_path: Path,
     parsed_metadata: dict[str, Any],
+    detections: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "ok": True,
@@ -80,4 +84,5 @@ def detection_response(
         "saved_to": str(image_path),
         "metadata_saved_to": str(metadata_path),
         "metadata": parsed_metadata,
+        "detections": detections,
     }
