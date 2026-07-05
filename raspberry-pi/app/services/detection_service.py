@@ -5,16 +5,17 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import HTTPException, UploadFile
+from fastapi import BackgroundTasks, HTTPException, UploadFile
 
 from app.config import settings
 from app.inference.model import predict_image
-from app.storage.filesystem import save_upload
+from app.storage.filesystem import save_upload, update_metadata
 
 
 async def receive_detection_upload(
     image: UploadFile,
     raw_metadata: str,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     if image.content_type not in settings.allowed_image_types:
         raise HTTPException(
@@ -31,15 +32,40 @@ async def receive_detection_upload(
         suffix=suffix,
         metadata=parsed_metadata,
     )
-    detections = predict_image(image_path)
+    update_metadata(metadata_path, {"inference_status": "queued"})
+    background_tasks.add_task(run_inference_job, image_path, metadata_path)
 
-    return detection_response(
-        image=image,
-        image_id=image_id,
-        image_path=image_path,
-        metadata_path=metadata_path,
-        parsed_metadata=parsed_metadata,
-        detections=detections,
+    return {
+        "ok": True,
+        "status": "accepted",
+        "image_id": image_id,
+        "filename": image.filename,
+        "content_type": image.content_type,
+        "saved_to": str(image_path),
+        "metadata_saved_to": str(metadata_path),
+        "inference_status": "queued",
+    }
+
+
+def run_inference_job(image_path: Path, metadata_path: Path) -> None:
+    try:
+        detections = predict_image(image_path)
+    except Exception as exc:
+        update_metadata(
+            metadata_path,
+            {
+                "inference_status": "failed",
+                "inference_error": str(exc),
+            },
+        )
+        raise
+
+    update_metadata(
+        metadata_path,
+        {
+            "inference_status": "complete",
+            "detections": detections,
+        },
     )
 
 
@@ -66,23 +92,3 @@ def safe_image_suffix(filename: str | None) -> str:
     if suffix not in settings.allowed_image_suffixes:
         return settings.default_image_suffix
     return suffix
-
-
-def detection_response(
-    image: UploadFile,
-    image_id: str,
-    image_path: Path,
-    metadata_path: Path,
-    parsed_metadata: dict[str, Any],
-    detections: list[dict[str, Any]],
-) -> dict[str, Any]:
-    return {
-        "ok": True,
-        "image_id": image_id,
-        "filename": image.filename,
-        "content_type": image.content_type,
-        "saved_to": str(image_path),
-        "metadata_saved_to": str(metadata_path),
-        "metadata": parsed_metadata,
-        "detections": detections,
-    }

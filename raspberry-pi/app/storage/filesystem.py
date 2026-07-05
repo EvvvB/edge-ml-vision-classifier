@@ -38,3 +38,12 @@ async def save_upload(
     )
 
     return image_path, metadata_path
+
+
+def update_metadata(metadata_path: Path, updates: dict[str, Any]) -> None:
+    saved_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    saved_metadata.update(updates)
+    metadata_path.write_text(
+        json.dumps(saved_metadata, indent=2) + "\n",
+        encoding="utf-8",
+    )
