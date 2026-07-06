@@ -1,1 +1,10 @@
 runs/
+cloud-api/
+
+__pycache__/
+*.py[cod]
+
+# Nicla local capture outputs
+detections/
+nicla/datasets/
+nicla/receiver/detections/
