@@ -1,8 +1,9 @@
 runs/
-cloud-api/
 
 __pycache__/
 *.py[cod]
+.env
+.venv/
 
 # Nicla local capture outputs
 detections/

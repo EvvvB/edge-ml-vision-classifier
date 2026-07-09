@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+set -eu
+
+if docker compose version >/dev/null 2>&1; then
+    exec docker compose "$@"
+fi
+
+docker_desktop_compose="/Applications/Docker.app/Contents/Resources/cli-plugins/docker-compose"
+if [ -x "$docker_desktop_compose" ]; then
+    exec "$docker_desktop_compose" "$@"
+fi
+
+echo "Docker Compose was not found. Install Docker Desktop or the Docker Compose plugin." >&2
+exit 1
