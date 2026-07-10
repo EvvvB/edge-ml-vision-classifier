@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+from io import BytesIO
 import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from fastapi import BackgroundTasks, HTTPException, UploadFile
+from PIL import Image
 
 from app.config import settings
 from app.inference.model import predict_image
-from app.storage.filesystem import save_upload, update_metadata
+from app.storage.filesystem import save_upload, save_upload_bytes, update_metadata
 
 
 async def receive_detection_upload(
@@ -17,21 +19,31 @@ async def receive_detection_upload(
     raw_metadata: str,
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
-    if image.content_type not in settings.allowed_image_types:
+    parsed_metadata = parse_metadata(raw_metadata)
+    image_id = uuid4().hex
+
+    if image.content_type in settings.allowed_raw_image_types:
+        image_path, metadata_path = await save_raw_upload(
+            image_id=image_id,
+            image=image,
+            metadata=parsed_metadata,
+        )
+        saved_content_type = "image/jpeg"
+    elif image.content_type in settings.allowed_image_types:
+        suffix = safe_image_suffix(image.filename)
+        image_path, metadata_path = await save_upload(
+            image_id=image_id,
+            image=image,
+            suffix=suffix,
+            metadata=parsed_metadata,
+        )
+        saved_content_type = image.content_type
+    else:
         raise HTTPException(
             status_code=400,
             detail=f"unsupported image type: {image.content_type}",
         )
 
-    parsed_metadata = parse_metadata(raw_metadata)
-    suffix = safe_image_suffix(image.filename)
-    image_id = uuid4().hex
-    image_path, metadata_path = await save_upload(
-        image_id=image_id,
-        image=image,
-        suffix=suffix,
-        metadata=parsed_metadata,
-    )
     update_metadata(metadata_path, {"inference_status": "queued"})
     background_tasks.add_task(run_inference_job, image_path, metadata_path)
 
@@ -40,11 +52,144 @@ async def receive_detection_upload(
         "status": "accepted",
         "image_id": image_id,
         "filename": image.filename,
-        "content_type": image.content_type,
+        "content_type": saved_content_type,
+        "source_content_type": image.content_type,
         "saved_to": str(image_path),
         "metadata_saved_to": str(metadata_path),
         "inference_status": "queued",
     }
+
+
+async def save_raw_upload(
+    image_id: str,
+    image: UploadFile,
+    metadata: dict[str, Any],
+) -> tuple[Path, Path]:
+    raw_bytes = await image.read()
+    converted_bytes = convert_raw_image_to_jpeg(raw_bytes, metadata)
+
+    metadata = {
+        **metadata,
+        "source_content_type": image.content_type,
+        "stored_image_encoding": "jpeg",
+        "stored_image_content_type": "image/jpeg",
+        "stored_image_suffix": ".jpg",
+    }
+
+    return save_upload_bytes(
+        image_id=image_id,
+        filename=converted_filename(image.filename),
+        content_type="image/jpeg",
+        suffix=".jpg",
+        image_bytes=converted_bytes,
+        metadata=metadata,
+    )
+
+
+def convert_raw_image_to_jpeg(
+    raw_bytes: bytes,
+    metadata: dict[str, Any],
+) -> bytes:
+    frame_width = positive_metadata_int(metadata, "frame_width")
+    frame_height = positive_metadata_int(metadata, "frame_height")
+    image_encoding = metadata.get("image_encoding")
+    expected_byte_count = expected_raw_byte_count(
+        frame_width,
+        frame_height,
+        image_encoding,
+    )
+
+    if len(raw_bytes) != expected_byte_count:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "raw image byte count mismatch: "
+                f"expected {expected_byte_count}, got {len(raw_bytes)}"
+            ),
+        )
+
+    if image_encoding == "grayscale":
+        pil_image = Image.frombytes(
+            "L",
+            (frame_width, frame_height),
+            raw_bytes,
+        )
+    elif image_encoding == "rgb565":
+        pil_image = Image.frombytes(
+            "RGB",
+            (frame_width, frame_height),
+            rgb565_to_rgb888(raw_bytes),
+        )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported raw image encoding: {image_encoding}",
+        )
+
+    output = BytesIO()
+    pil_image.save(output, format="JPEG", quality=95)
+    return output.getvalue()
+
+
+def positive_metadata_int(metadata: dict[str, Any], key: str) -> int:
+    try:
+        value = int(metadata[key])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"metadata field must be a positive integer: {key}",
+        ) from exc
+
+    if value <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"metadata field must be a positive integer: {key}",
+        )
+
+    return value
+
+
+def expected_raw_byte_count(
+    frame_width: int,
+    frame_height: int,
+    image_encoding: Any,
+) -> int:
+    pixel_count = frame_width * frame_height
+
+    if image_encoding == "grayscale":
+        return pixel_count
+
+    if image_encoding == "rgb565":
+        return pixel_count * 2
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"unsupported raw image encoding: {image_encoding}",
+    )
+
+
+def rgb565_to_rgb888(raw_bytes: bytes) -> bytes:
+    rgb = bytearray((len(raw_bytes) // 2) * 3)
+    output_index = 0
+
+    for input_index in range(0, len(raw_bytes), 2):
+        # OpenMV exposes RGB565 framebuffer bytes little-endian.
+        value = raw_bytes[input_index] | (raw_bytes[input_index + 1] << 8)
+        red = (value >> 11) & 0x1F
+        green = (value >> 5) & 0x3F
+        blue = value & 0x1F
+
+        rgb[output_index] = (red * 255) // 31
+        rgb[output_index + 1] = (green * 255) // 63
+        rgb[output_index + 2] = (blue * 255) // 31
+        output_index += 3
+
+    return bytes(rgb)
+
+
+def converted_filename(filename: str | None) -> str:
+    stem = Path(filename or "nicla-frame").stem or "nicla-frame"
+    return f"{stem}.jpg"
 
 
 def run_inference_job(image_path: Path, metadata_path: Path) -> None:

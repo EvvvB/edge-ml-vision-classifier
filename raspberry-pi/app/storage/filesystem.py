@@ -40,6 +40,37 @@ async def save_upload(
     return image_path, metadata_path
 
 
+def save_upload_bytes(
+    image_id: str,
+    filename: str | None,
+    content_type: str,
+    suffix: str,
+    image_bytes: bytes,
+    metadata: dict[str, Any],
+) -> tuple[Path, Path]:
+    settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    settings.metadata_dir.mkdir(parents=True, exist_ok=True)
+
+    image_path = settings.upload_dir / f"{image_id}{suffix}"
+    metadata_path = settings.metadata_dir / f"{image_id}.json"
+
+    image_path.write_bytes(image_bytes)
+
+    saved_metadata = {
+        "image_id": image_id,
+        "filename": filename,
+        "content_type": content_type,
+        "image_path": str(image_path),
+        "metadata": metadata,
+    }
+    metadata_path.write_text(
+        json.dumps(saved_metadata, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    return image_path, metadata_path
+
+
 def update_metadata(metadata_path: Path, updates: dict[str, Any]) -> None:
     saved_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     saved_metadata.update(updates)

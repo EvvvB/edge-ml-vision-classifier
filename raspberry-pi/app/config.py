@@ -14,6 +14,9 @@ class Settings:
     allowed_image_types: frozenset[str] = frozenset(
         {"image/jpeg", "image/png", "image/webp"}
     )
+    allowed_raw_image_types: frozenset[str] = frozenset(
+        {"application/octet-stream"}
+    )
     allowed_image_suffixes: frozenset[str] = frozenset(
         {".jpg", ".jpeg", ".png", ".webp"}
     )

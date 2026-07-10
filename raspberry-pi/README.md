@@ -20,6 +20,23 @@ curl -X POST http://127.0.0.1:8000/detections \
   -F 'metadata={"device_id":"pi-01","label":"cat","confidence":0.94,"captured_at":"2026-07-02T20:15:00-07:00"}'
 ```
 
+The receiver also accepts raw Nicla uploads as `application/octet-stream`.
+For the current HVGA RGB565 color firmware, metadata includes:
+
+```json
+{
+  "image_encoding": "rgb565",
+  "frame_width": 480,
+  "frame_height": 320,
+  "image_byte_count": 307200
+}
+```
+
+Raw uploads are converted to high-quality JPEG files before storage and
+inference. The receiver reads the dimensions from metadata, so other raw
+frame sizes can work as long as `image_byte_count` matches the encoding and
+dimensions.
+
 The server saves images under `raspberry-pi/uploads/` and metadata JSON files under `raspberry-pi/metadata/`. Both files share the same generated `image_id`.
 
 ## Model weights
