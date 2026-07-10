@@ -2,18 +2,18 @@
 #
 # 2 rows x 3 columns = 6 inferences per frame
 #
-# USB packet format:
-#   4 bytes: b"NIMG"
-#   4 bytes: JSON metadata length
-#   4 bytes: JPEG length
-#   N bytes: JSON metadata
-#   N bytes: JPEG image
+# Wireless upload format:
+#   HTTP POST multipart/form-data to POST /detections
+#   form field "metadata": JSON metadata
+#   form file "image": raw RGB565 image bytes
+#
+# Detection and upload use the same HVGA frame so boxes line up exactly.
 #
 # LED meanings:
 #   3 green flashes = main.py started
 #   1 short red flash = object detected
 #   1 short blue flash = image and metadata sent successfully
-#   1 long red light = USB transfer failed
+#   1 long red light = Wi-Fi/API transfer failed
 #
 # LEDs remain off during normal operation.
 
@@ -22,12 +22,27 @@ import time
 import ml
 import math
 import image
-import struct
 import pyb
 import json
+import network
+import socket
+import gc
 
 from ml.utils import NMS
 from ml.preprocessing import Normalization
+
+try:
+    from wifi_config import (
+        WIFI_SSID,
+        WIFI_PASSWORD,
+        API_URL,
+        DEVICE_ID
+    )
+except ImportError:
+    WIFI_SSID = ""
+    WIFI_PASSWORD = ""
+    API_URL = ""
+    DEVICE_ID = "nicla-vision"
 
 
 # ---------------------------------------------------------
@@ -71,7 +86,7 @@ blue_led.off()
 
 sensor.reset()
 sensor.set_pixformat(sensor.RGB565)
-sensor.set_framesize(sensor.QVGA)  # 320 x 240
+sensor.set_framesize(sensor.HVGA)  # 480 x 320 detection frame
 sensor.skip_frames(time=2000)
 
 
@@ -85,13 +100,23 @@ threshold_list = [
     (math.ceil(MIN_CONFIDENCE * 255), 255)
 ]
 
-FRAME_WIDTH = 320
-FRAME_HEIGHT = 240
+# Keep socket writes small. Sending data[offset:] on a large
+# framebuffer can allocate a second full-frame copy and fail.
+HTTP_SEND_CHUNK_SIZE = 2048
+
+FRAME_WIDTH = 480
+FRAME_HEIGHT = 320
 
 GRID_COLUMNS = 3
 GRID_ROWS = 2
 
+# Expand each grid tile by this many pixels on each side, clipped
+# to the frame edges. With 160x160 base cells, 16 px per side creates
+# a 32 px neighbor overlap, or 20% of the base tile width.
+TILE_OVERLAP_PIXELS = 16
+
 DRAW_TILE_GRID = True
+DRAW_TILE_ROIS = True
 DRAW_DETECTIONS = True
 
 FRAME_DELAY_MS = 0
@@ -111,25 +136,28 @@ UPLOAD_FAILURE_LED_ON_MS = 1500
 
 
 # ---------------------------------------------------------
-# USB image-transfer settings
+# Wireless image-transfer settings
 # ---------------------------------------------------------
 
-USB_JPEG_QUALITY = 75
-
 # Prevent repeated uploads of the same continuously visible object.
-USB_UPLOAD_COOLDOWN_MS = 3000
+UPLOAD_COOLDOWN_MS = 3000
 
-USB_SEND_TIMEOUT_MS = 10000
+WIFI_CONNECT_TIMEOUT_MS = 10000
+WIFI_RETRY_COOLDOWN_MS = 30000
+HTTP_SOCKET_TIMEOUT_SECONDS = 20
+REQUIRE_WIFI_BEFORE_DETECTION = True
+PRINT_WIFI_SCAN_ON_FAILURE = True
 
-# Keep False during binary USB transfers.
-DEBUG_PRINTS = False
+DEBUG_PRINTS = True
 
-USB_MAGIC = b"NIMG"
+HTTP_BOUNDARY = "----nicla-vision-boundary"
 
-usb = pyb.USB_VCP()
+wlan = network.WLAN(network.WLAN.IF_STA)
 
-# JPEG data may contain byte 0x03, which normally means Ctrl+C.
-usb.setinterrupt(-1)
+last_wifi_attempt_ms = time.ticks_add(
+    time.ticks_ms(),
+    -WIFI_RETRY_COOLDOWN_MS
+)
 
 
 # ---------------------------------------------------------
@@ -142,42 +170,187 @@ def debug_print(*args):
 
 
 # ---------------------------------------------------------
-# USB connection check
+# Wi-Fi connection helpers
 # ---------------------------------------------------------
 
-def usb_receiver_connected():
-    if not usb.isconnected():
+def wireless_configured():
+    return bool(WIFI_SSID and API_URL)
+
+
+def ensure_wifi_connected():
+    global last_wifi_attempt_ms
+
+    if not wireless_configured():
+        print(
+            "Missing Wi-Fi config. Save wifi_config.py to the Nicla filesystem."
+        )
         return False
 
-    # Avoid sending binary packets into the OpenMV IDE terminal.
     try:
-        if usb.debug_mode_enabled():
+        if wlan.isconnected():
+            return True
+
+    except Exception as error:
+        print("Wi-Fi status check failed:", error)
+        return False
+
+    now = time.ticks_ms()
+
+    if (
+        time.ticks_diff(
+            now,
+            last_wifi_attempt_ms
+        )
+        < WIFI_RETRY_COOLDOWN_MS
+    ):
+        return False
+
+    last_wifi_attempt_ms = now
+
+    print("Connecting Wi-Fi:", WIFI_SSID)
+
+    try:
+        wlan.active(True)
+        wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+
+    except Exception as error:
+        print("Wi-Fi connect failed:", error)
+        return False
+
+    started_at = time.ticks_ms()
+
+    while True:
+        try:
+            if wlan.isconnected():
+                break
+
+        except Exception as error:
+            print("Wi-Fi status check failed while connecting:", error)
             return False
-    except AttributeError:
-        # Older firmware might not have debug_mode_enabled().
-        pass
+
+        if (
+            time.ticks_diff(
+                time.ticks_ms(),
+                started_at
+            )
+            > WIFI_CONNECT_TIMEOUT_MS
+        ):
+            print("Wi-Fi connection timed out.")
+            print("Check SSID/password, 2.4 GHz Wi-Fi, and same network as Mac.")
+            print_wifi_scan()
+            return False
+
+        time.sleep_ms(250)
+
+    try:
+        print("Wi-Fi connected:", wlan.ifconfig())
+
+    except Exception:
+        print("Wi-Fi connected.")
 
     return True
 
 
+def decode_ssid(raw_ssid):
+    try:
+        return raw_ssid.decode("utf-8")
+    except Exception:
+        return str(raw_ssid)
+
+
+def print_wifi_scan():
+    if not PRINT_WIFI_SCAN_ON_FAILURE:
+        return
+
+    print("Scanning Wi-Fi networks...")
+
+    try:
+        networks = wlan.scan()
+    except Exception as error:
+        print("Wi-Fi scan failed:", error)
+        return
+
+    found_target = False
+
+    for network_info in networks:
+        ssid = decode_ssid(network_info[0])
+        channel = network_info[2]
+        rssi = network_info[3]
+        security = network_info[4]
+
+        if ssid == WIFI_SSID:
+            found_target = True
+
+        print(
+            "  SSID:",
+            ssid,
+            "| channel:",
+            channel,
+            "| RSSI:",
+            rssi,
+            "| security:",
+            security
+        )
+
+    if found_target:
+        print("Target SSID is visible:", WIFI_SSID)
+    else:
+        print("Target SSID was NOT visible:", WIFI_SSID)
+
+
+def api_reachable_hint():
+    if not API_URL:
+        return
+
+    print("API URL:", API_URL)
+
+
+api_reachable_hint()
+
+
+def wait_for_initial_wifi():
+    if not wireless_configured():
+        print("Wi-Fi is not configured; detection loop will run without upload.")
+        return
+
+    if not REQUIRE_WIFI_BEFORE_DETECTION:
+        ensure_wifi_connected()
+        return
+
+    print("Waiting for Wi-Fi before starting detections...")
+
+    while not ensure_wifi_connected():
+        red_led.on()
+        time.sleep_ms(150)
+        red_led.off()
+        time.sleep_ms(850)
+
+    print("Wi-Fi ready. Starting detections.")
+
+
 # ---------------------------------------------------------
-# Send image and metadata over USB
+# HTTP upload helpers
 # ---------------------------------------------------------
 
-def send_detection_image(img, detections):
-    """
-    Packet format:
+def infer_image_encoding(frame_width, frame_height, image_byte_count):
+    pixel_count = frame_width * frame_height
 
-        4 bytes: b"NIMG"
-        4 bytes: JSON metadata length
-        4 bytes: JPEG length
-        N bytes: JSON metadata
-        N bytes: JPEG image
-    """
+    if image_byte_count == pixel_count:
+        return "grayscale"
 
-    if not usb_receiver_connected():
-        return False
+    if image_byte_count == pixel_count * 2:
+        return "rgb565"
 
+    return "unknown"
+
+
+def build_detection_metadata(
+    detections,
+    frame_width,
+    frame_height,
+    image_encoding,
+    image_byte_count
+):
     metadata_detections = []
 
     for detection in detections:
@@ -212,10 +385,15 @@ def send_detection_image(img, detections):
             ]
         })
 
-    metadata = {
+    return {
         "version": 1,
-        "frame_width": FRAME_WIDTH,
-        "frame_height": FRAME_HEIGHT,
+        "device_id": DEVICE_ID,
+        "transport": "wifi_http",
+        "image_encoding": image_encoding,
+        "image_content_type": "application/octet-stream",
+        "image_byte_count": image_byte_count,
+        "frame_width": frame_width,
+        "frame_height": frame_height,
         "grid_columns": GRID_COLUMNS,
         "grid_rows": GRID_ROWS,
         "minimum_confidence": MIN_CONFIDENCE,
@@ -224,43 +402,203 @@ def send_detection_image(img, detections):
         "detections": metadata_detections
     }
 
-    metadata_bytes = json.dumps(metadata).encode("utf-8")
-    metadata_size = len(metadata_bytes)
 
-    # Compress the original, unannotated frame in place.
-    img.compress(quality=USB_JPEG_QUALITY)
+def parse_http_url(url):
+    if not url.startswith("http://"):
+        raise ValueError("Only http:// API_URL values are supported")
 
-    jpeg_size = img.size()
+    remainder = url[len("http://"):]
+    slash_index = remainder.find("/")
 
-    header = struct.pack(
-        "<4sII",
-        USB_MAGIC,
-        metadata_size,
-        jpeg_size
+    if slash_index < 0:
+        host_port = remainder
+        path = "/detections"
+    else:
+        host_port = remainder[:slash_index]
+        path = remainder[slash_index:]
+
+    if ":" in host_port:
+        host, port_text = host_port.rsplit(":", 1)
+        port = int(port_text)
+    else:
+        host = host_port
+        port = 80
+
+    if not path or path == "/":
+        path = "/detections"
+
+    return host, port, path
+
+
+def send_all(sock, data):
+    offset = 0
+    data_length = len(data)
+
+    while offset < data_length:
+        end = min(
+            offset + HTTP_SEND_CHUNK_SIZE,
+            data_length
+        )
+
+        sent = sock.send(data[offset:end])
+
+        if sent <= 0:
+            raise OSError("socket connection broken")
+
+        offset += sent
+
+
+def post_multipart_image(api_url, metadata_bytes, image_bytes):
+    host, port, path = parse_http_url(api_url)
+
+    metadata_header = (
+        "--" + HTTP_BOUNDARY + "\r\n"
+        'Content-Disposition: form-data; name="metadata"\r\n'
+        "\r\n"
+    ).encode("utf-8")
+
+    image_header = (
+        "\r\n"
+        "--" + HTTP_BOUNDARY + "\r\n"
+        'Content-Disposition: form-data; '
+        'name="image"; filename="nicla-frame.raw"\r\n'
+        "Content-Type: application/octet-stream\r\n"
+        "\r\n"
+    ).encode("utf-8")
+
+    closing_boundary = (
+        "\r\n"
+        "--" + HTTP_BOUNDARY + "--\r\n"
+    ).encode("utf-8")
+
+    content_length = (
+        len(metadata_header)
+        + len(metadata_bytes)
+        + len(image_header)
+        + len(image_bytes)
+        + len(closing_boundary)
     )
 
-    header_sent = usb.send(
-        header,
-        timeout=USB_SEND_TIMEOUT_MS
+    request_header = (
+        "POST " + path + " HTTP/1.1\r\n"
+        "Host: " + host + ":" + str(port) + "\r\n"
+        "Content-Type: multipart/form-data; boundary=" + HTTP_BOUNDARY + "\r\n"
+        "Content-Length: " + str(content_length) + "\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).encode("utf-8")
+
+    address = socket.getaddrinfo(host, port)[0][-1]
+    sock = socket.socket()
+    sock.settimeout(HTTP_SOCKET_TIMEOUT_SECONDS)
+
+    try:
+        sock.connect(address)
+        send_all(sock, request_header)
+        send_all(sock, metadata_header)
+        send_all(sock, metadata_bytes)
+        send_all(sock, image_header)
+        send_all(sock, image_bytes)
+        send_all(sock, closing_boundary)
+
+        response = sock.recv(256)
+        print("HTTP response:", response)
+
+    finally:
+        sock.close()
+
+    return (
+        response.startswith(b"HTTP/1.1 2")
+        or response.startswith(b"HTTP/1.0 2")
     )
 
-    if header_sent != len(header):
+
+def raw_image_buffer(img):
+    try:
+        return img.bytearray()
+    except AttributeError:
+        return bytes(img)
+
+
+def image_dimension(img, dimension_name, fallback):
+    try:
+        dimension = getattr(img, dimension_name)
+
+        if callable(dimension):
+            return int(dimension())
+
+        return int(dimension)
+
+    except Exception:
+        return fallback
+
+
+def send_detection_image(img, detections):
+    if not ensure_wifi_connected():
         return False
 
-    metadata_sent = usb.send(
-        metadata_bytes,
-        timeout=USB_SEND_TIMEOUT_MS
-    )
+    gc.collect()
 
-    if metadata_sent != metadata_size:
-        return False
+    upload_ok = False
+    image_bytes = None
+    metadata_bytes = None
 
-    image_sent = usb.send(
-        img,
-        timeout=USB_SEND_TIMEOUT_MS
-    )
+    try:
+        upload_width = image_dimension(
+            img,
+            "width",
+            FRAME_WIDTH
+        )
 
-    return image_sent == jpeg_size
+        upload_height = image_dimension(
+            img,
+            "height",
+            FRAME_HEIGHT
+        )
+
+        print(
+            "Upload frame:",
+            upload_width,
+            "x",
+            upload_height
+        )
+
+        image_bytes = raw_image_buffer(img)
+        image_byte_count = len(image_bytes)
+        image_encoding = infer_image_encoding(
+            upload_width,
+            upload_height,
+            image_byte_count
+        )
+
+        print(
+            "Raw image encoding:",
+            image_encoding,
+            "| bytes:",
+            image_byte_count
+        )
+
+        metadata = build_detection_metadata(
+            detections,
+            upload_width,
+            upload_height,
+            image_encoding,
+            image_byte_count
+        )
+        metadata_bytes = json.dumps(metadata).encode("utf-8")
+
+        upload_ok = post_multipart_image(
+            API_URL,
+            metadata_bytes,
+            image_bytes
+        )
+
+    finally:
+        image_bytes = None
+        metadata_bytes = None
+        gc.collect()
+
+    return upload_ok
 
 
 # ---------------------------------------------------------
@@ -342,7 +680,7 @@ def fomo_post_process(model, inputs, outputs):
 # Build tile regions
 # ---------------------------------------------------------
 
-def create_tile_rois(columns, rows):
+def create_tile_rois(columns, rows, overlap_pixels):
     rois = []
 
     for row in range(rows):
@@ -353,12 +691,32 @@ def create_tile_rois(columns, rows):
             x1 = (column * FRAME_WIDTH) // columns
             x2 = ((column + 1) * FRAME_WIDTH) // columns
 
+            roi_x1 = max(
+                0,
+                x1 - overlap_pixels
+            )
+
+            roi_y1 = max(
+                0,
+                y1 - overlap_pixels
+            )
+
+            roi_x2 = min(
+                FRAME_WIDTH,
+                x2 + overlap_pixels
+            )
+
+            roi_y2 = min(
+                FRAME_HEIGHT,
+                y2 + overlap_pixels
+            )
+
             rois.append(
                 (
-                    x1,
-                    y1,
-                    x2 - x1,
-                    y2 - y1
+                    roi_x1,
+                    roi_y1,
+                    roi_x2 - roi_x1,
+                    roi_y2 - roi_y1
                 )
             )
 
@@ -367,7 +725,8 @@ def create_tile_rois(columns, rows):
 
 tile_rois = create_tile_rois(
     GRID_COLUMNS,
-    GRID_ROWS
+    GRID_ROWS,
+    TILE_OVERLAP_PIXELS
 )
 
 debug_print(
@@ -384,9 +743,16 @@ debug_print(
 )
 
 debug_print(
+    "Tile overlap pixels:",
+    TILE_OVERLAP_PIXELS
+)
+
+debug_print(
     "Tiles:",
     tile_rois
 )
+
+wait_for_initial_wifi()
 
 
 # ---------------------------------------------------------
@@ -397,7 +763,7 @@ clock = time.clock()
 
 last_upload_ms = time.ticks_add(
     time.ticks_ms(),
-    -USB_UPLOAD_COOLDOWN_MS
+    -UPLOAD_COOLDOWN_MS
 )
 
 last_detection_led_ms = time.ticks_add(
@@ -511,7 +877,7 @@ while True:
         last_detection_led_ms = now
 
     # -----------------------------------------------------
-    # USB upload
+    # Wireless upload
     # -----------------------------------------------------
 
     upload_cooldown_complete = (
@@ -519,13 +885,13 @@ while True:
             now,
             last_upload_ms
         )
-        >= USB_UPLOAD_COOLDOWN_MS
+        >= UPLOAD_COOLDOWN_MS
     )
 
     should_upload = (
         total_detections > 0
         and upload_cooldown_complete
-        and usb_receiver_connected()
+        and wireless_configured()
     )
 
     if should_upload:
@@ -539,7 +905,7 @@ while True:
 
         except Exception as error:
             debug_print(
-                "USB image error:",
+                "Wireless image error:",
                 error
             )
 
@@ -555,20 +921,18 @@ while True:
             )
 
         else:
-            # Long red light means the USB transfer failed.
+            # Long red light means the Wi-Fi/API transfer failed.
             red_led.on()
             time.sleep_ms(UPLOAD_FAILURE_LED_ON_MS)
             red_led.off()
 
         debug_print(
-            "USB image sent:",
+            "Wireless image sent:",
             upload_succeeded,
             "| detections:",
             total_detections
         )
 
-        # img was JPEG-compressed in place, so capture a new frame
-        # instead of trying to draw onto the compressed image.
         if FRAME_DELAY_MS > 0:
             time.sleep_ms(FRAME_DELAY_MS)
 
@@ -578,68 +942,90 @@ while True:
     # Draw detections on non-upload frames
     # -----------------------------------------------------
 
-    if DRAW_DETECTIONS:
-        for detection in detections_to_draw:
-            (
-                x,
-                y,
-                width,
-                height,
-                center_x,
-                center_y,
-                color,
-                tile_number,
-                label,
-                score
-            ) = detection
+    try:
+        if DRAW_DETECTIONS:
+            for detection in detections_to_draw:
+                (
+                    x,
+                    y,
+                    width,
+                    height,
+                    center_x,
+                    center_y,
+                    color,
+                    tile_number,
+                    label,
+                    score
+                ) = detection
 
-            img.draw_circle(
-                center_x,
-                center_y,
-                12,
-                color=color,
-                thickness=2
-            )
+                img.draw_circle(
+                    center_x,
+                    center_y,
+                    12,
+                    color=color,
+                    thickness=2
+                )
 
-            img.draw_rectangle(
-                x,
-                y,
-                width,
-                height,
-                color=color,
-                thickness=2
-            )
+                img.draw_rectangle(
+                    x,
+                    y,
+                    width,
+                    height,
+                    color=color,
+                    thickness=2
+                )
 
     # -----------------------------------------------------
     # Draw tile grid
     # -----------------------------------------------------
 
-    if DRAW_TILE_GRID:
-        for column in range(1, GRID_COLUMNS):
-            grid_x = (
-                column * FRAME_WIDTH
-            ) // GRID_COLUMNS
+        if DRAW_TILE_GRID:
+            for column in range(1, GRID_COLUMNS):
+                grid_x = (
+                    column * FRAME_WIDTH
+                ) // GRID_COLUMNS
 
-            img.draw_line(
-                grid_x,
-                0,
-                grid_x,
-                FRAME_HEIGHT - 1,
-                color=(255, 255, 255)
-            )
+                img.draw_line(
+                    grid_x,
+                    0,
+                    grid_x,
+                    FRAME_HEIGHT - 1,
+                    color=(255, 255, 255)
+                )
 
-        for row in range(1, GRID_ROWS):
-            grid_y = (
-                row * FRAME_HEIGHT
-            ) // GRID_ROWS
+            for row in range(1, GRID_ROWS):
+                grid_y = (
+                    row * FRAME_HEIGHT
+                ) // GRID_ROWS
 
-            img.draw_line(
-                0,
-                grid_y,
-                FRAME_WIDTH - 1,
-                grid_y,
-                color=(255, 255, 255)
-            )
+                img.draw_line(
+                    0,
+                    grid_y,
+                    FRAME_WIDTH - 1,
+                    grid_y,
+                    color=(255, 255, 255)
+                )
+
+        if DRAW_TILE_ROIS:
+            for tile_roi in tile_rois:
+                (
+                    roi_x,
+                    roi_y,
+                    roi_width,
+                    roi_height
+                ) = tile_roi
+
+                img.draw_rectangle(
+                    roi_x,
+                    roi_y,
+                    roi_width,
+                    roi_height,
+                    color=(0, 255, 255),
+                    thickness=1
+                )
+
+    except ValueError as error:
+        debug_print("Skipping annotation draw:", error)
 
     debug_print(
         "detections:",

@@ -9,3 +9,4 @@ __pycache__/
 detections/
 nicla/datasets/
 nicla/receiver/detections/
+nicla/firmware/wifi_config.py
