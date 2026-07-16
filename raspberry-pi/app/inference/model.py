@@ -10,6 +10,11 @@ INFERENCE_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL_PATH = INFERENCE_DIR / "models" / "yolo26m.pt"
 RUNS_DIR = INFERENCE_DIR / "runs"
 
+# The Nicla sends HVGA frames, so 480 is the long side of what actually
+# arrives. Ultralytics scales the long side up to imgsz, so a 640 default
+# would upscale every frame past its own resolution before inference.
+DEFAULT_IMAGE_SIZE = 480
+
 os.environ.setdefault("YOLO_CONFIG_DIR", str(INFERENCE_DIR / ".ultralytics"))
 os.environ.setdefault("MPLCONFIGDIR", str(INFERENCE_DIR / ".matplotlib"))
 
@@ -24,7 +29,7 @@ def load_model(model_path: str | Path = DEFAULT_MODEL_PATH):
 def predict_image(
     image_path: str | Path,
     model_path: str | Path = DEFAULT_MODEL_PATH,
-    imgsz: int = 640,
+    imgsz: int = DEFAULT_IMAGE_SIZE,
     device: str = "cpu",
     save: bool = False,
 ) -> list[dict[str, Any]]:
