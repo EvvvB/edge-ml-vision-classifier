@@ -25,6 +25,21 @@ async def check_s3(s3_client: Any, bucket: str) -> None:
     await run_in_threadpool(s3_client.head_bucket, Bucket=bucket)
 
 
+async def download_image(
+    *,
+    s3_client: Any,
+    bucket: str,
+    key: str,
+) -> dict[str, Any]:
+    response = await run_in_threadpool(s3_client.get_object, Bucket=bucket, Key=key)
+    body = await run_in_threadpool(response["Body"].read)
+    return {
+        "body": body,
+        "content_type": response.get("ContentType"),
+        "etag": response.get("ETag"),
+    }
+
+
 async def upload_image(
     *,
     s3_client: Any,

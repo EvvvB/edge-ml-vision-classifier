@@ -4,12 +4,23 @@ import secrets
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.security import APIKeyHeader
 from starlette.status import HTTP_201_CREATED, HTTP_401_UNAUTHORIZED
 
 from app.services.detection_service import (
     get_detection,
+    get_detection_image,
     list_detections,
     receive_detection_upload,
 )
@@ -29,6 +40,22 @@ async def require_api_key(provided: str | None = Depends(api_key_header)) -> Non
     if not settings.api_key:
         return
     if provided is None or not secrets.compare_digest(provided, settings.api_key):
+        raise HTTPException(
+            status_code=HTTP_401_UNAUTHORIZED,
+            detail="invalid or missing API key",
+        )
+
+
+async def require_api_key_or_query(
+    request: Request,
+    provided: str | None = Depends(api_key_header),
+) -> None:
+    # Browsers cannot attach headers to <img> requests, so the image endpoint
+    # also accepts the key as a ?key= query parameter.
+    if not settings.api_key:
+        return
+    candidate = provided or request.query_params.get("key")
+    if candidate is None or not secrets.compare_digest(candidate, settings.api_key):
         raise HTTPException(
             status_code=HTTP_401_UNAUTHORIZED,
             detail="invalid or missing API key",
@@ -56,6 +83,23 @@ async def receive_detection(
 @router.get("/detections/{image_id}", dependencies=[Depends(require_api_key)])
 async def read_detection(request: Request, image_id: UUID) -> dict[str, Any]:
     return await get_detection(request.app.state.db, image_id=image_id)
+
+
+@router.get(
+    "/detections/{image_id}/image",
+    dependencies=[Depends(require_api_key_or_query)],
+)
+async def read_detection_image(
+    request: Request,
+    image_id: UUID,
+    if_none_match: str | None = Header(default=None),
+) -> Response:
+    return await get_detection_image(
+        request.app.state.db,
+        s3_client=request.app.state.s3_client,
+        image_id=image_id,
+        if_none_match=if_none_match,
+    )
 
 
 @router.get("/detections", dependencies=[Depends(require_api_key)])

@@ -7,7 +7,8 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import asyncpg
-from fastapi import HTTPException, UploadFile
+from botocore.exceptions import ClientError
+from fastapi import HTTPException, Response, UploadFile
 
 from app.config import settings
 from app.storage.postgres import (
@@ -17,7 +18,11 @@ from app.storage.postgres import (
     mark_detection_failed,
     mark_detection_stored,
 )
-from app.storage.s3 import upload_image
+from app.storage.s3 import download_image, upload_image
+
+# Images are keyed by UUID and never rewritten, so clients may cache them
+# forever without revalidating.
+IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
 
 async def receive_detection_upload(
@@ -102,6 +107,60 @@ async def get_detection(db: asyncpg.Pool, image_id: UUID) -> dict[str, Any]:
     if detection is None:
         raise HTTPException(status_code=404, detail="detection not found")
     return {"ok": True, "detection": detection}
+
+
+async def get_detection_image(
+    db: asyncpg.Pool,
+    s3_client: Any,
+    image_id: UUID,
+    if_none_match: str | None = None,
+) -> Response:
+    detection = await fetch_detection(db, image_id=image_id)
+    if detection is None:
+        raise HTTPException(status_code=404, detail="detection not found")
+    if detection["upload_status"] != "stored":
+        raise HTTPException(
+            status_code=404,
+            detail=f"detection image is not stored (status: {detection['upload_status']})",
+        )
+
+    stored_etag = detection.get("s3_etag")
+    if if_none_match and stored_etag and if_none_match == stored_etag:
+        return Response(
+            status_code=304,
+            headers={
+                "Cache-Control": IMMUTABLE_CACHE_CONTROL,
+                "ETag": stored_etag,
+            },
+        )
+
+    try:
+        image = await download_image(
+            s3_client=s3_client,
+            bucket=detection["s3_bucket"],
+            key=detection["s3_key"],
+        )
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code")
+        if error_code in {"NoSuchKey", "404"}:
+            raise HTTPException(
+                status_code=404,
+                detail="detection image is missing from storage",
+            ) from exc
+        raise HTTPException(
+            status_code=502,
+            detail="failed to fetch detection image from storage",
+        ) from exc
+
+    headers = {"Cache-Control": IMMUTABLE_CACHE_CONTROL}
+    etag = image.get("etag") or stored_etag
+    if etag:
+        headers["ETag"] = etag
+    return Response(
+        content=image["body"],
+        media_type=image.get("content_type") or detection["content_type"],
+        headers=headers,
+    )
 
 
 async def list_detections(
