@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,18 @@ class Settings:
     # duplicate candidate. Roughly the firmware's tile overlap plus slack for
     # the centroid drift of a split object.
     tile_boundary_band_pixels: int = 40
+
+    # Cloud forwarding. Leaving CLOUD_API_URL unset disables forwarding, so
+    # the Pi keeps working standalone.
+    cloud_api_url: str = os.environ.get("CLOUD_API_URL", "")
+    cloud_api_key: str = os.environ.get("CLOUD_API_KEY", "")
+    cloud_forward_timeout_seconds: float = float(
+        os.environ.get("CLOUD_FORWARD_TIMEOUT_SECONDS", "30")
+    )
+    cloud_forward_attempts: int = int(os.environ.get("CLOUD_FORWARD_ATTEMPTS", "3"))
+    cloud_forward_retry_seconds: float = float(
+        os.environ.get("CLOUD_FORWARD_RETRY_SECONDS", "2")
+    )
 
 
 settings = Settings()

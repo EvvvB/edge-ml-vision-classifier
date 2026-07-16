@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from io import BytesIO
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ from PIL import Image
 
 from app.config import settings
 from app.inference.model import predict_image
+from app.services.cloud_forwarder import forward_detection
 from app.services.coco import normalize_fomo_detections, normalize_yolo_detections
 from app.services.tile_dedupe import deduplicate_tile_detections
 from app.storage.filesystem import save_upload, save_upload_bytes, update_metadata
@@ -51,6 +53,7 @@ async def receive_detection_upload(
     update_metadata(
         metadata_path,
         {
+            "received_at": datetime.now(UTC).isoformat(),
             "fomo_detections": fomo_detections,
             "yolo_detections": [],
             "inference_status": "queued",
@@ -231,6 +234,9 @@ def run_inference_job(image_path: Path, metadata_path: Path) -> None:
                 "inference_error": str(exc),
             },
         )
+        # The frame and the device's own detections are still worth keeping
+        # in the cloud even when the Pi's model errored.
+        forward_detection(image_path, metadata_path)
         raise
 
     update_metadata(
@@ -240,6 +246,7 @@ def run_inference_job(image_path: Path, metadata_path: Path) -> None:
             "yolo_detections": normalize_yolo_detections(detections),
         },
     )
+    forward_detection(image_path, metadata_path)
 
 
 def parse_metadata(raw_metadata: str) -> dict[str, Any]:

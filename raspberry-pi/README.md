@@ -39,6 +39,32 @@ dimensions.
 
 The server saves images under `raspberry-pi/uploads/` and metadata JSON files under `raspberry-pi/metadata/`. Both files share the same generated `image_id`.
 
+## Cloud forwarding
+
+After inference finishes, each detection (image plus merged metadata: device
+fields, FOMO detections, YOLO detections) is forwarded to the cloud API's
+`POST /detections` endpoint. Forwarding is off unless `CLOUD_API_URL` is set,
+so the Pi keeps working standalone.
+
+```bash
+export CLOUD_API_URL="http://<cloud-host>"
+export CLOUD_API_KEY="<key from the server's .env.production>"
+fastapi dev app/main.py --host 0.0.0.0 --port 8000
+```
+
+Optional tuning:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CLOUD_FORWARD_TIMEOUT_SECONDS` | `30` | Per-request timeout |
+| `CLOUD_FORWARD_ATTEMPTS` | `3` | Attempts per detection (retries on network errors and 5xx only) |
+| `CLOUD_FORWARD_RETRY_SECONDS` | `2` | First retry delay, doubling each attempt |
+
+The outcome lands in the local metadata JSON as `cloud_sync_status`
+(`synced` or `failed`), with `cloud_image_id` holding the cloud's UUID on
+success and `cloud_sync_error` holding the reason on failure. A forwarding
+failure never blocks or fails the local pipeline.
+
 ## Model weights
 
 Model weights are stored locally under `app/inference/models/` and ignored by Git.
