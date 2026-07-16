@@ -22,5 +22,13 @@ class Settings:
     )
     default_image_suffix: str = ".jpg"
 
+    # Cross-tile duplicate suppression for Nicla FOMO detections. Two centers
+    # closer than this, in adjacent tiles, are treated as one object.
+    tile_duplicate_distance_pixels: float = 48.0
+    # How far from a shared tile boundary a center may sit and still be a
+    # duplicate candidate. Roughly the firmware's tile overlap plus slack for
+    # the centroid drift of a split object.
+    tile_boundary_band_pixels: int = 40
+
 
 settings = Settings()

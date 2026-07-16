@@ -11,6 +11,7 @@ from PIL import Image
 
 from app.config import settings
 from app.inference.model import predict_image
+from app.services.tile_dedupe import deduplicate_tile_detections
 from app.storage.filesystem import save_upload, save_upload_bytes, update_metadata
 
 
@@ -19,7 +20,7 @@ async def receive_detection_upload(
     raw_metadata: str,
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
-    parsed_metadata = parse_metadata(raw_metadata)
+    parsed_metadata = deduplicate_tile_detections(parse_metadata(raw_metadata))
     image_id = uuid4().hex
 
     if image.content_type in settings.allowed_raw_image_types:
