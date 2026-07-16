@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import numpy
 from fastapi import BackgroundTasks, HTTPException, UploadFile
 from PIL import Image
 
@@ -179,22 +180,24 @@ def expected_raw_byte_count(
 
 
 def rgb565_to_rgb888(raw_bytes: bytes) -> bytes:
-    rgb = bytearray((len(raw_bytes) // 2) * 3)
-    output_index = 0
+    # OpenMV exposes RGB565 framebuffer bytes little-endian, so each pixel
+    # reads as one little-endian uint16. Unpacking the whole frame at once
+    # keeps a per-pixel Python loop off the event loop, which matters on the
+    # Pi's much slower cores.
+    packed = numpy.frombuffer(raw_bytes, dtype="<u2")
 
-    for input_index in range(0, len(raw_bytes), 2):
-        # OpenMV exposes RGB565 framebuffer bytes little-endian.
-        value = raw_bytes[input_index] | (raw_bytes[input_index + 1] << 8)
-        red = (value >> 11) & 0x1F
-        green = (value >> 5) & 0x3F
-        blue = value & 0x1F
+    # 255 // 31 and 255 // 63 rescale each channel to a full byte. The
+    # intermediate products peak at 16065, so uint16 does not overflow.
+    red = (packed >> 11) & 0x1F
+    green = (packed >> 5) & 0x3F
+    blue = packed & 0x1F
 
-        rgb[output_index] = (red * 255) // 31
-        rgb[output_index + 1] = (green * 255) // 63
-        rgb[output_index + 2] = (blue * 255) // 31
-        output_index += 3
+    rgb = numpy.empty((packed.size, 3), dtype=numpy.uint8)
+    rgb[:, 0] = (red * 255) // 31
+    rgb[:, 1] = (green * 255) // 63
+    rgb[:, 2] = (blue * 255) // 31
 
-    return bytes(rgb)
+    return rgb.tobytes()
 
 
 def converted_filename(filename: str | None) -> str:
