@@ -1,0 +1,16 @@
+[Unit]
+Description=Edge ML vision detection receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ev
+WorkingDirectory=/home/ev/edge-ml-vision-classifier/raspberry-pi
+# systemd-format copy of .env.cloud (no `export` prefix); see README.
+EnvironmentFile=/etc/vision-receiver.env
+ExecStart=/home/ev/edge-ml-vision-classifier/raspberry-pi/.venv/bin/fastapi run app/main.py --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

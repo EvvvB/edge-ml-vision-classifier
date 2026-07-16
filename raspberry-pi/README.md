@@ -65,6 +65,34 @@ The outcome lands in the local metadata JSON as `cloud_sync_status`
 success and `cloud_sync_error` holding the reason on failure. A forwarding
 failure never blocks or fails the local pipeline.
 
+## Run at boot (systemd)
+
+[deploy/vision-receiver.service](deploy/vision-receiver.service) runs the
+receiver as a system service. It reads its environment from
+`/etc/vision-receiver.env`, which is `.env.cloud` converted to systemd's
+format (no `export` prefix). Install on the Pi:
+
+```bash
+sudo sh -c 'sed "s/^export //" ~ev/edge-ml-vision-classifier/raspberry-pi/.env.cloud \
+  > /etc/vision-receiver.env && chmod 600 /etc/vision-receiver.env'
+sudo cp ~ev/edge-ml-vision-classifier/raspberry-pi/deploy/vision-receiver.service \
+  /etc/systemd/system/vision-receiver.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now vision-receiver
+```
+
+Check on it with:
+
+```bash
+systemctl status vision-receiver
+journalctl -u vision-receiver -f
+```
+
+The unit assumes the repo lives at `/home/ev/edge-ml-vision-classifier`;
+edit the paths and `User=` if that differs. After changing `.env.cloud`,
+regenerate `/etc/vision-receiver.env` (first command above) and
+`sudo systemctl restart vision-receiver`.
+
 ## Model weights
 
 Model weights are stored locally under `app/inference/models/` and ignored by Git.
