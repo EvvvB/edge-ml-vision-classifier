@@ -163,39 +163,169 @@ async def fetch_detection(
     return serialize_row(row) if row else None
 
 
+DETECTION_SOURCES = ("fomo", "yolo")
+
+
+def detection_array(source: str) -> str:
+    return f"coalesce(metadata->'{source}_detections', '[]'::jsonb)"
+
+
+def build_detection_filters(
+    *,
+    device_id: str | None,
+    labels: list[str],
+    detections: str,
+    source: str,
+    params: list[Any],
+) -> str:
+    """Append filter params to `params` and return a WHERE clause (or '')."""
+    sources = DETECTION_SOURCES if source == "any" else (source,)
+    clauses: list[str] = []
+
+    if device_id is not None:
+        params.append(device_id)
+        clauses.append(f"device_id = ${len(params)}")
+
+    if detections == "some":
+        clauses.append(
+            "("
+            + " OR ".join(
+                f"jsonb_array_length({detection_array(s)}) > 0" for s in sources
+            )
+            + ")"
+        )
+    elif detections == "none":
+        clauses.append(
+            "("
+            + " AND ".join(
+                f"jsonb_array_length({detection_array(s)}) = 0" for s in sources
+            )
+            + ")"
+        )
+
+    if labels:
+        params.append(labels)
+        position = len(params)
+        clauses.append(
+            "("
+            + " OR ".join(
+                f"EXISTS (SELECT 1 FROM jsonb_array_elements({detection_array(s)}) AS d"
+                f" WHERE lower(d->>'label') = ANY(${position}::text[]))"
+                for s in sources
+            )
+            + ")"
+        )
+
+    if not clauses:
+        return ""
+    return " WHERE " + " AND ".join(clauses)
+
+
 async def fetch_detections(
     pool: asyncpg.Pool,
     *,
     device_id: str | None,
+    labels: list[str],
+    detections: str,
+    source: str,
     limit: int,
     offset: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int]:
+    params: list[Any] = []
+    where = build_detection_filters(
+        device_id=device_id,
+        labels=labels,
+        detections=detections,
+        source=source,
+        params=params,
+    )
+
     async with pool.acquire() as conn:
-        if device_id is None:
-            rows = await conn.fetch(
-                """
-                SELECT *
-                FROM detections
-                ORDER BY created_at DESC
-                LIMIT $1 OFFSET $2
-                """,
-                limit,
-                offset,
-            )
-        else:
-            rows = await conn.fetch(
-                """
-                SELECT *
-                FROM detections
-                WHERE device_id = $1
-                ORDER BY created_at DESC
-                LIMIT $2 OFFSET $3
-                """,
-                device_id,
-                limit,
-                offset,
-            )
-    return [serialize_row(row) for row in rows]
+        total = await conn.fetchval(
+            f"SELECT count(*) FROM detections{where}",
+            *params,
+        )
+        rows = await conn.fetch(
+            f"""
+            SELECT *
+            FROM detections{where}
+            ORDER BY created_at DESC
+            LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
+            """,
+            *params,
+            limit,
+            offset,
+        )
+    return [serialize_row(row) for row in rows], total
+
+
+async def fetch_detection_facets(
+    pool: asyncpg.Pool,
+    *,
+    device_id: str | None,
+    source: str,
+) -> dict[str, Any]:
+    sources = DETECTION_SOURCES if source == "any" else (source,)
+
+    device_params: list[Any] = []
+    device_where = ""
+    if device_id is not None:
+        device_params.append(device_id)
+        device_where = " WHERE device_id = $1"
+
+    # One (image_id, label) pair per record and label; UNION dedupes a label
+    # reported by both models, so counts mean "records containing this label".
+    label_arms = " UNION ".join(
+        f"SELECT image_id, lower(d->>'label') AS label"
+        f" FROM detections, jsonb_array_elements({detection_array(s)}) AS d"
+        f"{device_where}"
+        for s in sources
+    )
+    none_clause = " AND ".join(
+        f"jsonb_array_length({detection_array(s)}) = 0" for s in sources
+    )
+
+    async with pool.acquire() as conn:
+        label_rows = await conn.fetch(
+            f"""
+            SELECT label, count(*) AS record_count
+            FROM ({label_arms}) AS labeled
+            WHERE label IS NOT NULL AND label <> ''
+            GROUP BY label
+            ORDER BY record_count DESC, label
+            """,
+            *device_params,
+        )
+        total = await conn.fetchval(
+            f"SELECT count(*) FROM detections{device_where}",
+            *device_params,
+        )
+        none_where = device_where + (" AND " if device_where else " WHERE ")
+        none_count = await conn.fetchval(
+            f"SELECT count(*) FROM detections{none_where}{none_clause}",
+            *device_params,
+        )
+        device_rows = await conn.fetch(
+            """
+            SELECT device_id, count(*) AS record_count
+            FROM detections
+            GROUP BY device_id
+            ORDER BY record_count DESC
+            """
+        )
+
+    return {
+        "total": total,
+        "none": none_count,
+        "labels": [
+            {"label": row["label"], "count": row["record_count"]}
+            for row in label_rows
+        ],
+        "devices": [
+            {"device_id": row["device_id"], "count": row["record_count"]}
+            for row in device_rows
+        ],
+    }
 
 
 def serialize_row(row: asyncpg.Record) -> dict[str, Any]:

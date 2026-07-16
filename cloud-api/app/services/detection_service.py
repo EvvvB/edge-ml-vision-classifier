@@ -13,6 +13,7 @@ from fastapi import HTTPException, Response, UploadFile
 from app.config import settings
 from app.storage.postgres import (
     fetch_detection,
+    fetch_detection_facets,
     fetch_detections,
     insert_detection_upload,
     mark_detection_failed,
@@ -163,9 +164,38 @@ async def get_detection_image(
     )
 
 
+VALID_DETECTION_FILTERS = frozenset({"any", "some", "none"})
+VALID_SOURCE_FILTERS = frozenset({"any", "fomo", "yolo"})
+MAX_LABEL_FILTERS = 25
+
+
+def parse_label_filters(labels: str | None) -> list[str]:
+    if not labels:
+        return []
+    parsed = sorted({label.strip().lower() for label in labels.split(",") if label.strip()})
+    if len(parsed) > MAX_LABEL_FILTERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"at most {MAX_LABEL_FILTERS} labels may be filtered at once",
+        )
+    return parsed
+
+
+def validate_filter_value(name: str, value: str, allowed: frozenset[str]) -> str:
+    if value not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{name} must be one of: {', '.join(sorted(allowed))}",
+        )
+    return value
+
+
 async def list_detections(
     db: asyncpg.Pool,
     device_id: str | None,
+    labels: str | None,
+    detections: str,
+    source: str,
     limit: int,
     offset: int,
 ) -> dict[str, Any]:
@@ -176,14 +206,29 @@ async def list_detections(
             status_code=400,
             detail="offset must be greater than or equal to 0",
         )
+    validate_filter_value("detections", detections, VALID_DETECTION_FILTERS)
+    validate_filter_value("source", source, VALID_SOURCE_FILTERS)
 
-    detections = await fetch_detections(
+    rows, total = await fetch_detections(
         db,
         device_id=device_id,
+        labels=parse_label_filters(labels),
+        detections=detections,
+        source=source,
         limit=limit,
         offset=offset,
     )
-    return {"ok": True, "detections": detections}
+    return {"ok": True, "detections": rows, "total": total}
+
+
+async def get_detection_facets(
+    db: asyncpg.Pool,
+    device_id: str | None,
+    source: str,
+) -> dict[str, Any]:
+    validate_filter_value("source", source, VALID_SOURCE_FILTERS)
+    facets = await fetch_detection_facets(db, device_id=device_id, source=source)
+    return {"ok": True, **facets}
 
 
 def parse_metadata(raw_metadata: str) -> dict[str, Any]:

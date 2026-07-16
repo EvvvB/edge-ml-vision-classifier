@@ -20,6 +20,7 @@ from starlette.status import HTTP_201_CREATED, HTTP_401_UNAUTHORIZED
 
 from app.services.detection_service import (
     get_detection,
+    get_detection_facets,
     get_detection_image,
     list_detections,
     receive_detection_upload,
@@ -80,6 +81,20 @@ async def receive_detection(
     )
 
 
+# Registered before /detections/{image_id} so "facets" is not parsed as a UUID.
+@router.get("/detections/facets", dependencies=[Depends(require_api_key)])
+async def read_detection_facets(
+    request: Request,
+    device_id: str | None = None,
+    source: str = "any",
+) -> dict[str, Any]:
+    return await get_detection_facets(
+        request.app.state.db,
+        device_id=device_id,
+        source=source,
+    )
+
+
 @router.get("/detections/{image_id}", dependencies=[Depends(require_api_key)])
 async def read_detection(request: Request, image_id: UUID) -> dict[str, Any]:
     return await get_detection(request.app.state.db, image_id=image_id)
@@ -106,12 +121,18 @@ async def read_detection_image(
 async def read_detections(
     request: Request,
     device_id: str | None = None,
+    labels: str | None = None,
+    detections: str = "any",
+    source: str = "any",
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
     return await list_detections(
         request.app.state.db,
         device_id=device_id,
+        labels=labels,
+        detections=detections,
+        source=source,
         limit=limit,
         offset=offset,
     )

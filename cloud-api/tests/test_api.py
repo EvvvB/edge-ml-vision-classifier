@@ -153,6 +153,41 @@ async def test_detection_image_404_when_not_stored(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_detections_reject_invalid_filter_values(monkeypatch) -> None:
+    pool = Mock()
+    monkeypatch.setattr(main, "create_db_pool", AsyncMock(return_value=pool))
+    monkeypatch.setattr(main, "init_db", AsyncMock())
+    monkeypatch.setattr(main, "close_db_pool", AsyncMock())
+    monkeypatch.setattr(main, "create_s3_client", Mock(return_value=Mock()))
+
+    transport = httpx.ASGITransport(app=main.app)
+    async with main.lifespan(main.app):
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            bad_detections = await client.get(
+                "/detections", params={"detections": "bogus"}
+            )
+            bad_source = await client.get("/detections", params={"source": "ssd"})
+            bad_facet_source = await client.get(
+                "/detections/facets", params={"source": "ssd"}
+            )
+
+    assert bad_detections.status_code == 400
+    assert "detections must be one of" in bad_detections.json()["detail"]
+    assert bad_source.status_code == 400
+    assert bad_facet_source.status_code == 400
+
+
+def test_parse_label_filters_normalizes() -> None:
+    from app.services.detection_service import parse_label_filters
+
+    assert parse_label_filters(None) == []
+    assert parse_label_filters(" Dog ,person,,DOG ") == ["dog", "person"]
+
+
+@pytest.mark.asyncio
 async def test_detections_require_api_key_when_configured(monkeypatch) -> None:
     import dataclasses
 
