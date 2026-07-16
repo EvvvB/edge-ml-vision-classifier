@@ -11,6 +11,7 @@ from PIL import Image
 
 from app.config import settings
 from app.inference.model import predict_image
+from app.services.coco import normalize_fomo_detections, normalize_yolo_detections
 from app.services.tile_dedupe import deduplicate_tile_detections
 from app.storage.filesystem import save_upload, save_upload_bytes, update_metadata
 
@@ -21,13 +22,14 @@ async def receive_detection_upload(
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     parsed_metadata = deduplicate_tile_detections(parse_metadata(raw_metadata))
+    device_metadata, fomo_detections = split_device_detections(parsed_metadata)
     image_id = uuid4().hex
 
     if image.content_type in settings.allowed_raw_image_types:
         image_path, metadata_path = await save_raw_upload(
             image_id=image_id,
             image=image,
-            metadata=parsed_metadata,
+            metadata=device_metadata,
         )
         saved_content_type = "image/jpeg"
     elif image.content_type in settings.allowed_image_types:
@@ -36,7 +38,7 @@ async def receive_detection_upload(
             image_id=image_id,
             image=image,
             suffix=suffix,
-            metadata=parsed_metadata,
+            metadata=device_metadata,
         )
         saved_content_type = image.content_type
     else:
@@ -45,7 +47,14 @@ async def receive_detection_upload(
             detail=f"unsupported image type: {image.content_type}",
         )
 
-    update_metadata(metadata_path, {"inference_status": "queued"})
+    update_metadata(
+        metadata_path,
+        {
+            "fomo_detections": fomo_detections,
+            "yolo_detections": [],
+            "inference_status": "queued",
+        },
+    )
     background_tasks.add_task(run_inference_job, image_path, metadata_path)
 
     return {
@@ -193,6 +202,21 @@ def converted_filename(filename: str | None) -> str:
     return f"{stem}.jpg"
 
 
+def split_device_detections(
+    metadata: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Separate the device's own detections from the rest of its metadata.
+
+    Detections are stored top level alongside the YOLO results so both models
+    share one schema and one nesting depth. What remains under "metadata" is
+    then purely what the device reported about itself and the frame.
+    """
+    device_metadata = {
+        key: value for key, value in metadata.items() if key != "detections"
+    }
+    return device_metadata, normalize_fomo_detections(metadata.get("detections"))
+
+
 def run_inference_job(image_path: Path, metadata_path: Path) -> None:
     try:
         detections = predict_image(image_path)
@@ -210,7 +234,7 @@ def run_inference_job(image_path: Path, metadata_path: Path) -> None:
         metadata_path,
         {
             "inference_status": "complete",
-            "detections": detections,
+            "yolo_detections": normalize_yolo_detections(detections),
         },
     )
 
