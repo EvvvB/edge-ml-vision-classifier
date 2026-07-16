@@ -1,4 +1,5 @@
 import { DEFAULT_FILTERS, isDefaultFilters } from './filterState.js'
+import Sparkline from './Sparkline.jsx'
 
 function RadioGroup({ name, value, options, onChange }) {
   return (
@@ -43,6 +44,8 @@ export default function FilterSidebar({ filters, facets, onChange }) {
 
   return (
     <aside className="filters">
+      <Sparkline timeline={facets?.timeline} />
+
       <div className="filter-group">
         <h3>Detections</h3>
         <RadioGroup

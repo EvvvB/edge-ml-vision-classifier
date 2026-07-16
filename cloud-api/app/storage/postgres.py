@@ -313,10 +313,35 @@ async def fetch_detection_facets(
             ORDER BY record_count DESC
             """
         )
+        timeline_device_clause = (
+            " AND device_id = $1" if device_id is not None else ""
+        )
+        timeline_rows = await conn.fetch(
+            f"""
+            SELECT hours.bucket AS bucket, coalesce(counted.record_count, 0) AS record_count
+            FROM generate_series(
+                date_trunc('hour', now()) - interval '23 hours',
+                date_trunc('hour', now()),
+                interval '1 hour'
+            ) AS hours(bucket)
+            LEFT JOIN (
+                SELECT date_trunc('hour', created_at) AS bucket, count(*) AS record_count
+                FROM detections
+                WHERE created_at > now() - interval '24 hours'{timeline_device_clause}
+                GROUP BY 1
+            ) AS counted USING (bucket)
+            ORDER BY hours.bucket
+            """,
+            *device_params,
+        )
 
     return {
         "total": total,
         "none": none_count,
+        "timeline": [
+            {"hour": row["bucket"].isoformat(), "count": row["record_count"]}
+            for row in timeline_rows
+        ],
         "labels": [
             {"label": row["label"], "count": row["record_count"]}
             for row in label_rows

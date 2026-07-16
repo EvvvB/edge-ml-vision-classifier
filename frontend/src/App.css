@@ -149,6 +149,19 @@
   font-size: 13px;
 }
 
+.sparkline-value {
+  margin: 0 0 6px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.sparkline {
+  display: block;
+  width: 100%;
+  height: auto;
+  color: var(--text-dim);
+}
+
 .filters select {
   width: 100%;
   padding: 8px 10px;
