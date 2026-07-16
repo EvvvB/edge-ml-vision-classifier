@@ -1,0 +1,47 @@
+name: edge-ml-cloud-api-prod
+
+# Production stack for the EC2 instance: the API container plus Postgres.
+# Object storage is real S3 (no MinIO); the instance IAM role provides
+# credentials, so no AWS keys belong in .env.production.
+
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "80:8000"
+    env_file: .env.production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: postgres:16.14-alpine
+    restart: unless-stopped
+    # Not exposed to the host on purpose; only the api container can reach it.
+    environment:
+      POSTGRES_DB: vision_classifier
+      POSTGRES_USER: vision
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.production}
+    env_file: .env.production
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vision -d vision_classifier"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  postgres-data:

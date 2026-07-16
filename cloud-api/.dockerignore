@@ -1,0 +1,11 @@
+.venv
+.env
+.env.production
+.pytest_cache
+__pycache__
+**/__pycache__
+tests
+compose.yaml
+compose.prod.yaml
+README.md
+DEPLOY.md
