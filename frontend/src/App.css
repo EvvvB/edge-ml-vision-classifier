@@ -1,0 +1,272 @@
+/* --- Key gate --- */
+
+.keygate {
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.keygate-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(360px, 100%);
+  padding: 32px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.keygate-card h1 {
+  font-size: 22px;
+}
+
+.keygate-card p {
+  margin: 0;
+  color: var(--text-dim);
+}
+
+.keygate-card input {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.keygate-card input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.keygate-card button {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent);
+  color: #0b1016;
+  font-weight: 600;
+}
+
+.keygate-card button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.keygate-error {
+  color: var(--error);
+  font-size: 14px;
+}
+
+/* --- Dashboard --- */
+
+.dashboard {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px 20px 48px;
+}
+
+.dashboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+}
+
+.dashboard-header h1 {
+  font-size: 24px;
+}
+
+.dashboard-controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.dashboard-controls select {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+button.ghost {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+}
+
+button.ghost:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.dashboard-status {
+  color: var(--text-dim);
+  padding: 48px 0;
+  text-align: center;
+}
+
+.dashboard-status.error {
+  color: var(--error);
+}
+
+/* --- Detection grid --- */
+
+.detection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.detection-card {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+  text-align: left;
+  color: inherit;
+  transition: border-color 0.15s;
+}
+
+.detection-card:hover {
+  border-color: var(--accent);
+}
+
+.detection-card img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  display: block;
+  background: var(--surface-raised);
+}
+
+.detection-placeholder {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  display: grid;
+  place-items: center;
+  background: var(--surface-raised);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.detection-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+}
+
+.detection-device {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.detection-time {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.load-more {
+  display: block;
+  margin: 24px auto 0;
+  padding: 10px 24px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.load-more:hover {
+  border-color: var(--accent);
+}
+
+/* --- Detail modal --- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  z-index: 10;
+}
+
+.modal {
+  width: min(680px, 100%);
+  max-height: 90svh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.modal-header h2 {
+  font-size: 18px;
+}
+
+.modal img {
+  width: 100%;
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.modal-fields {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 16px;
+  margin: 16px 0;
+  font-size: 14px;
+}
+
+.modal-fields dt {
+  color: var(--text-dim);
+}
+
+.modal-fields dd {
+  margin: 0;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.modal details {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  font-size: 14px;
+}
+
+.modal summary {
+  cursor: pointer;
+  color: var(--text-dim);
+}
+
+.modal pre {
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+  font-size: 13px;
+}

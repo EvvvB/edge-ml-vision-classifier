@@ -1,5 +1,8 @@
 runs/
 
+# Built frontend (frontend/ -> npm run build)
+cloud-api/static/
+
 __pycache__/
 *.py[cod]
 .env

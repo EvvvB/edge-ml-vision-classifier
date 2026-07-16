@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.detections import router as detections_router
 from app.config import settings
@@ -31,3 +33,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(detections_router)
+
+# The built frontend (frontend/ -> npm run build) lands in static/; serve it
+# from the same origin as the API. API routes above take precedence over the
+# mount. In development the directory is absent and vite serves the app.
+static_dir = Path(__file__).resolve().parent.parent / "static"
+if static_dir.is_dir():
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")

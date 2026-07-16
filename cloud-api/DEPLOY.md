@@ -131,10 +131,14 @@ exit   # log out/in so the group change takes effect
 
 ## 7. Deploy the app
 
-From your machine, copy the service to the instance (rsync respects the
-excludes; .env files are never copied):
+From your machine, build the frontend (its output lands in
+`cloud-api/static/`, which the API container serves at `/`), then copy the
+service to the instance (rsync respects the excludes; .env files are never
+copied):
 
 ```bash
+(cd frontend && npm ci && npm run build)
+
 rsync -av -e "ssh -i ~/.ssh/vision-api.pem" \
   --exclude '.venv' --exclude '__pycache__' --exclude '.pytest_cache' \
   --exclude '.env*' \
@@ -170,9 +174,14 @@ curl -H "X-API-Key: $CLOUD_API_KEY" http://ELASTIC_IP/detections
 
 Then point the Raspberry Pi uploader at `http://ELASTIC_IP`.
 
+The dashboard is at `http://ELASTIC_IP/` — it asks for the API key
+(`CLOUD_API_KEY` from `.env.production`) on first visit and stores it in the
+browser.
+
 ## Redeploying after code changes
 
 ```bash
+(cd frontend && npm run build)   # only needed if frontend/ changed
 rsync -av -e "ssh -i ~/.ssh/vision-api.pem" \
   --exclude '.venv' --exclude '__pycache__' --exclude '.pytest_cache' \
   --exclude '.env*' \
