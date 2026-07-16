@@ -5,11 +5,24 @@ name: edge-ml-cloud-api-prod
 # credentials, so no AWS keys belong in .env.production.
 
 services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates live here; losing this volume means re-issuing them.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+
   api:
     build: .
     restart: unless-stopped
-    ports:
-      - "80:8000"
+    # Not exposed to the host; all traffic enters through caddy.
     env_file: .env.production
     volumes:
       # Built frontend, produced by `npm run build` in frontend/ and rsynced
@@ -50,3 +63,5 @@ services:
 
 volumes:
   postgres-data:
+  caddy-data:
+  caddy-config:

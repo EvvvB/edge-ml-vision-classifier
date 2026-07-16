@@ -1,0 +1,6 @@
+# TLS termination for the cloud API. Caddy provisions and renews the
+# Let's Encrypt certificate for this domain automatically; HTTP requests
+# are redirected to HTTPS.
+visionml.dev {
+	reverse_proxy api:8000
+}

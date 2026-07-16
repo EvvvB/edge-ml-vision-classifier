@@ -115,8 +115,25 @@ aws ec2 allocate-address                       # note the AllocationId
 aws ec2 associate-address --instance-id i-XXXX --allocation-id eipalloc-XXXX
 ```
 
-This IP is permanently yours until released. Adding a domain later is just an
-A record pointing at it plus nginx/Let's Encrypt on the instance.
+This IP is permanently yours until released.
+
+## 5b. Domain and HTTPS (added 2026-07-16)
+
+The domain `visionml.dev` is registered at Cloudflare with an A record →
+`ELASTIC_IP`, set to "DNS only" (grey cloud). TLS is terminated by the
+`caddy` service in `compose.prod.yaml` (see `Caddyfile`), which provisions
+and renews the Let's Encrypt certificate automatically; the api container is
+no longer published on a host port. Port 443 must be open:
+
+```bash
+aws ec2 authorize-security-group-ingress --group-id sg-XXXX \
+  --protocol tcp --port 443 --cidr 0.0.0.0/0
+```
+
+Note: `.dev` is HSTS-preloaded — browsers refuse plain HTTP on it, so the
+dashboard only works over HTTPS. Certificates persist in the `caddy-data`
+Docker volume. If Cloudflare is later flipped to Proxied (orange cloud), set
+its SSL mode to "Full (strict)".
 
 ## 6. Install Docker on the instance
 
@@ -207,6 +224,7 @@ ssh -i ~/.ssh/vision-api.pem ubuntu@ELASTIC_IP \
 | --- | --- |
 | Account | 365733422629 |
 | Region | us-west-1 |
+| Domain | visionml.dev (Cloudflare DNS, grey cloud → Elastic IP) |
 | Elastic IP | 54.193.80.15 |
 | Instance | i-061dade88294cbbc1 (t4g.micro, Ubuntu 24.04 arm64) |
 | Security group | sg-09e123632e19765f0 (80 open; 22 from home IP only) |
