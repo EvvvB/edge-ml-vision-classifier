@@ -80,18 +80,93 @@
   font-size: 24px;
 }
 
-.dashboard-controls {
+.dashboard-body {
   display: flex;
-  gap: 10px;
-  align-items: center;
+  gap: 28px;
+  align-items: flex-start;
 }
 
-.dashboard-controls select {
+.dashboard-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.results-bar {
+  margin: 0 0 14px;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+
+/* --- Filter sidebar --- */
+
+.filters {
+  width: 200px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.filter-group h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.filter-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.filter-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.filter-option input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.filter-count {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.filter-empty {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.filters select {
+  width: 100%;
   padding: 8px 10px;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
+}
+
+@media (max-width: 720px) {
+  .dashboard-body {
+    flex-direction: column;
+  }
+
+  .filters {
+    position: static;
+    width: 100%;
+  }
 }
 
 button.ghost {

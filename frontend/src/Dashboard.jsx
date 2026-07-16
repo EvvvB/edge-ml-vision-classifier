@@ -1,19 +1,30 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useInfiniteQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { apiFetch, detectionImageUrl } from './api.js'
+import FilterSidebar from './Filters.jsx'
+import { filtersFromUrl, syncFiltersToUrl } from './filterState.js'
 
 const PAGE_SIZE = 24
 const POLL_INTERVAL_MS = 30_000
 
-function useDetections(deviceId) {
+function filterParams(filters) {
+  return {
+    device_id: filters.deviceId || undefined,
+    labels: filters.labels.length > 0 ? filters.labels.join(',') : undefined,
+    detections: filters.detections !== 'any' ? filters.detections : undefined,
+    source: filters.source !== 'any' ? filters.source : undefined,
+  }
+}
+
+function useDetections(filters) {
   return useInfiniteQuery({
-    queryKey: ['detections', deviceId],
+    queryKey: ['detections', filterParams(filters)],
     queryFn: ({ pageParam }) =>
       apiFetch('/detections', {
         params: {
           limit: PAGE_SIZE,
           offset: pageParam,
-          device_id: deviceId || undefined,
+          ...filterParams(filters),
         },
       }),
     initialPageParam: 0,
@@ -21,6 +32,20 @@ function useDetections(deviceId) {
       lastPage.detections.length < PAGE_SIZE
         ? undefined
         : allPages.length * PAGE_SIZE,
+    refetchInterval: POLL_INTERVAL_MS,
+  })
+}
+
+function useFacets(filters) {
+  return useQuery({
+    queryKey: ['facets', filters.deviceId, filters.source],
+    queryFn: () =>
+      apiFetch('/detections/facets', {
+        params: {
+          device_id: filters.deviceId || undefined,
+          source: filters.source !== 'any' ? filters.source : undefined,
+        },
+      }),
     refetchInterval: POLL_INTERVAL_MS,
   })
 }
@@ -33,7 +58,7 @@ function formatTimestamp(value) {
 }
 
 export default function Dashboard({ onAuthError, onLock }) {
-  const [deviceId, setDeviceId] = useState('')
+  const [filters, setFilters] = useState(filtersFromUrl)
   const [selected, setSelected] = useState(null)
   const {
     data,
@@ -42,76 +67,82 @@ export default function Dashboard({ onAuthError, onLock }) {
     isFetchingNextPage,
     hasNextPage,
     fetchNextPage,
-  } = useDetections(deviceId)
+  } = useDetections(filters)
+  const facetsQuery = useFacets(filters)
 
   useEffect(() => {
-    if (error?.status === 401) onAuthError()
-  }, [error, onAuthError])
+    syncFiltersToUrl(filters)
+  }, [filters])
+
+  useEffect(() => {
+    if (error?.status === 401 || facetsQuery.error?.status === 401) {
+      onAuthError()
+    }
+  }, [error, facetsQuery.error, onAuthError])
 
   const detections = useMemo(
     () => (data ? data.pages.flatMap((page) => page.detections) : []),
     [data],
   )
-
-  const deviceIds = useMemo(() => {
-    const ids = new Set(detections.map((d) => d.device_id).filter(Boolean))
-    if (deviceId) ids.add(deviceId)
-    return [...ids].sort()
-  }, [detections, deviceId])
+  const total = data?.pages[0]?.total
 
   return (
     <div className="dashboard">
       <header className="dashboard-header">
         <h1>Vision Classifier</h1>
-        <div className="dashboard-controls">
-          <select
-            value={deviceId}
-            onChange={(event) => setDeviceId(event.target.value)}
-            aria-label="Filter by device"
-          >
-            <option value="">All devices</option>
-            {deviceIds.map((id) => (
-              <option key={id} value={id}>
-                {id}
-              </option>
-            ))}
-          </select>
-          <button type="button" className="ghost" onClick={onLock}>
-            Lock
-          </button>
-        </div>
+        <button type="button" className="ghost" onClick={onLock}>
+          Lock
+        </button>
       </header>
 
-      {isPending && <p className="dashboard-status">Loading detections…</p>}
-      {error && error.status !== 401 && (
-        <p className="dashboard-status error">
-          Failed to load detections: {error.message}
-        </p>
-      )}
-      {!isPending && !error && detections.length === 0 && (
-        <p className="dashboard-status">No detections yet.</p>
-      )}
+      <div className="dashboard-body">
+        <FilterSidebar
+          filters={filters}
+          facets={facetsQuery.data}
+          onChange={setFilters}
+        />
 
-      <div className="detection-grid">
-        {detections.map((detection) => (
-          <DetectionCard
-            key={detection.image_id}
-            detection={detection}
-            onClick={() => setSelected(detection)}
-          />
-        ))}
+        <main className="dashboard-main">
+          {total !== undefined && (
+            <p className="results-bar">
+              {total} {total === 1 ? 'result' : 'results'}
+            </p>
+          )}
+
+          {isPending && <p className="dashboard-status">Loading detections…</p>}
+          {error && error.status !== 401 && (
+            <p className="dashboard-status error">
+              Failed to load detections: {error.message}
+            </p>
+          )}
+          {!isPending && !error && detections.length === 0 && (
+            <p className="dashboard-status">
+              No detections match these filters.
+            </p>
+          )}
+
+          <div className="detection-grid">
+            {detections.map((detection) => (
+              <DetectionCard
+                key={detection.image_id}
+                detection={detection}
+                onClick={() => setSelected(detection)}
+              />
+            ))}
+          </div>
+
+          {hasNextPage && (
+            <button
+              type="button"
+              className="load-more"
+              onClick={() => fetchNextPage()}
+              disabled={isFetchingNextPage}
+            >
+              {isFetchingNextPage ? 'Loading…' : 'Load more'}
+            </button>
+          )}
+        </main>
       </div>
-
-      {hasNextPage && (
-        <button
-          type="button"
-          className="load-more"
-          onClick={() => fetchNextPage()}
-          disabled={isFetchingNextPage}
-        >
-          {isFetchingNextPage ? 'Loading…' : 'Load more'}
-        </button>
-      )}
 
       {selected && (
         <DetectionModal
