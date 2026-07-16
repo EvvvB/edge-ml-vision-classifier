@@ -126,15 +126,58 @@ export default function Dashboard({ onAuthError, onLock }) {
 function DetectionCard({ detection, onClick }) {
   const [broken, setBroken] = useState(false)
   const stored = detection.upload_status === 'stored'
+
+  const metadata = detection.metadata ?? {}
+  const boxes = overlayBoxes(metadata)
+  const frameWidth = Number(metadata.frame_width)
+  const frameHeight = Number(metadata.frame_height)
+  const canOverlay = frameWidth > 0 && frameHeight > 0
+  const counts = OVERLAY_SOURCES.filter((s) => boxes[s.key].length > 0)
+  const labels = [
+    ...new Set(
+      OVERLAY_SOURCES.flatMap((s) => boxes[s.key].map((d) => d.label)).filter(
+        Boolean,
+      ),
+    ),
+  ]
+
   return (
     <button type="button" className="detection-card" onClick={onClick}>
       {stored && !broken ? (
-        <img
-          src={detectionImageUrl(detection.image_id)}
-          alt={`Detection from ${detection.device_id ?? 'unknown device'}`}
-          loading="lazy"
-          onError={() => setBroken(true)}
-        />
+        <div
+          className="thumb-wrap"
+          style={
+            canOverlay
+              ? { aspectRatio: `${frameWidth} / ${frameHeight}` }
+              : undefined
+          }
+        >
+          <img
+            src={detectionImageUrl(detection.image_id)}
+            alt={`Detection from ${detection.device_id ?? 'unknown device'}`}
+            loading="lazy"
+            onError={() => setBroken(true)}
+          />
+          {canOverlay && (
+            <svg
+              className="thumb-overlay"
+              viewBox={`0 0 ${frameWidth} ${frameHeight}`}
+              preserveAspectRatio="none"
+            >
+              {OVERLAY_SOURCES.map((source) =>
+                boxes[source.key].map((det, index) => (
+                  <BoxMarker
+                    key={`${source.key}-${index}`}
+                    det={det}
+                    color={source.color}
+                    frameWidth={frameWidth}
+                    showLabel={false}
+                  />
+                )),
+              )}
+            </svg>
+          )}
+        </div>
       ) : (
         <div className="detection-placeholder">
           {stored ? 'image unavailable' : detection.upload_status}
@@ -147,12 +190,84 @@ function DetectionCard({ detection, onClick }) {
         <span className="detection-time">
           {formatTimestamp(detection.captured_at ?? detection.created_at)}
         </span>
+        {(counts.length > 0 || labels.length > 0) && (
+          <div className="detection-badges">
+            {counts.map((source) => (
+              <span
+                key={source.key}
+                className="badge"
+                style={{ '--chip-color': source.color }}
+              >
+                {boxes[source.key].length} {source.label}
+              </span>
+            ))}
+            {labels.length > 0 && (
+              <span className="detection-labels">{labels.join(', ')}</span>
+            )}
+          </div>
+        )}
       </div>
     </button>
   )
 }
 
+const OVERLAY_SOURCES = [
+  { key: 'fomo', metadataKey: 'fomo_detections', label: 'FOMO', color: '#f2a65a' },
+  { key: 'yolo', metadataKey: 'yolo_detections', label: 'YOLO', color: '#6fd08c' },
+]
+
+function overlayBoxes(metadata) {
+  const boxes = {}
+  for (const source of OVERLAY_SOURCES) {
+    const entries = metadata?.[source.metadataKey]
+    boxes[source.key] = Array.isArray(entries)
+      ? entries.filter((d) => Array.isArray(d.bbox) && d.bbox.length === 4)
+      : []
+  }
+  return boxes
+}
+
+function BoxMarker({ det, color, frameWidth, showLabel = true }) {
+  const [x, y, w, h] = det.bbox
+  const fontSize = Math.max(9, frameWidth * 0.035)
+  const label = `${det.label ?? 'object'} ${(det.confidence ?? 0).toFixed(2)}`
+  const labelAbove = y > fontSize + 4
+  return (
+    <g>
+      <rect
+        x={x}
+        y={y}
+        width={w}
+        height={h}
+        fill="none"
+        stroke={color}
+        strokeWidth={showLabel ? 2 : 1.5}
+        vectorEffect="non-scaling-stroke"
+      />
+      {Array.isArray(det.center) && det.center.length === 2 && (
+        <circle cx={det.center[0]} cy={det.center[1]} r={frameWidth * 0.008} fill={color} />
+      )}
+      {showLabel && (
+        <text
+          x={x}
+          y={labelAbove ? y - 3 : y + h + fontSize}
+          fill={color}
+          fontSize={fontSize}
+          fontFamily="ui-monospace, monospace"
+          paintOrder="stroke"
+          stroke="rgba(0,0,0,0.75)"
+          strokeWidth={fontSize * 0.18}
+        >
+          {label}
+        </text>
+      )}
+    </g>
+  )
+}
+
 function DetectionModal({ detection, onClose }) {
+  const [visible, setVisible] = useState({ fomo: true, yolo: true })
+
   useEffect(() => {
     function handleKey(event) {
       if (event.key === 'Escape') onClose()
@@ -160,6 +275,14 @@ function DetectionModal({ detection, onClose }) {
     window.addEventListener('keydown', handleKey)
     return () => window.removeEventListener('keydown', handleKey)
   }, [onClose])
+
+  const metadata = detection.metadata ?? {}
+  const boxes = overlayBoxes(metadata)
+  const frameWidth = Number(metadata.frame_width)
+  const frameHeight = Number(metadata.frame_height)
+  const stored = detection.upload_status === 'stored'
+  const canOverlay = stored && frameWidth > 0 && frameHeight > 0
+  const hasAnyBoxes = OVERLAY_SOURCES.some((s) => boxes[s.key].length > 0)
 
   return (
     <div
@@ -175,11 +298,48 @@ function DetectionModal({ detection, onClose }) {
             Close
           </button>
         </div>
-        {detection.upload_status === 'stored' && (
-          <img
-            src={detectionImageUrl(detection.image_id)}
-            alt={`Detection ${detection.image_id}`}
-          />
+        {canOverlay && hasAnyBoxes && (
+          <div className="overlay-toggles">
+            {OVERLAY_SOURCES.map((source) => (
+              <button
+                key={source.key}
+                type="button"
+                className={`chip${visible[source.key] ? ' active' : ''}`}
+                style={{ '--chip-color': source.color }}
+                onClick={() =>
+                  setVisible((v) => ({ ...v, [source.key]: !v[source.key] }))
+                }
+              >
+                {source.label} ({boxes[source.key].length})
+              </button>
+            ))}
+          </div>
+        )}
+        {stored && (
+          <div className="modal-image-wrap">
+            <img
+              src={detectionImageUrl(detection.image_id)}
+              alt={`Detection ${detection.image_id}`}
+            />
+            {canOverlay && (
+              <svg
+                className="modal-overlay"
+                viewBox={`0 0 ${frameWidth} ${frameHeight}`}
+                preserveAspectRatio="none"
+              >
+                {OVERLAY_SOURCES.filter((s) => visible[s.key]).map((source) =>
+                  boxes[source.key].map((det, index) => (
+                    <BoxMarker
+                      key={`${source.key}-${index}`}
+                      det={det}
+                      color={source.color}
+                      frameWidth={frameWidth}
+                    />
+                  )),
+                )}
+              </svg>
+            )}
+          </div>
         )}
         <dl className="modal-fields">
           <dt>Captured</dt>
