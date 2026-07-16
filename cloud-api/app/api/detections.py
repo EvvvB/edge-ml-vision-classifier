@@ -19,6 +19,7 @@ from fastapi.security import APIKeyHeader
 from starlette.status import HTTP_201_CREATED, HTTP_401_UNAUTHORIZED
 
 from app.services.detection_service import (
+    export_detections,
     get_detection,
     get_detection_facets,
     get_detection_image,
@@ -78,6 +79,30 @@ async def receive_detection(
         s3_client=request.app.state.s3_client,
         image=image,
         raw_metadata=metadata,
+    )
+
+
+# Registered before /detections/{image_id} so "export" is not parsed as a UUID.
+# Downloads are browser navigations, which cannot send headers, so the key is
+# also accepted as a query parameter.
+@router.get(
+    "/detections/export",
+    dependencies=[Depends(require_api_key_or_query)],
+)
+async def export_detections_route(
+    request: Request,
+    device_id: str | None = None,
+    labels: str | None = None,
+    detections: str = "any",
+    source: str = "any",
+) -> Response:
+    return await export_detections(
+        request.app.state.db,
+        s3_client=request.app.state.s3_client,
+        device_id=device_id,
+        labels=labels,
+        detections=detections,
+        source=source,
     )
 
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { apiFetch, detectionImageUrl } from './api.js'
+import { apiFetch, detectionImageUrl, exportDownloadUrl } from './api.js'
 import FilterSidebar from './Filters.jsx'
 import { filtersFromUrl, syncFiltersToUrl } from './filterState.js'
 
@@ -100,6 +100,8 @@ export default function Dashboard({ onAuthError, onLock }) {
           filters={filters}
           facets={facetsQuery.data}
           onChange={setFilters}
+          total={total}
+          exportUrl={exportDownloadUrl(filterParams(filters))}
         />
 
         <main className="dashboard-main">

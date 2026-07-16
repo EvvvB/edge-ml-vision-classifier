@@ -22,7 +22,15 @@ function RadioGroup({ name, value, options, onChange }) {
   )
 }
 
-export default function FilterSidebar({ filters, facets, onChange }) {
+const EXPORT_MAX_IMAGES = 1000
+
+export default function FilterSidebar({
+  filters,
+  facets,
+  onChange,
+  total,
+  exportUrl,
+}) {
   const set = (patch) => onChange({ ...filters, ...patch })
 
   // Keep selected labels visible even when the current facets don't include
@@ -121,6 +129,25 @@ export default function FilterSidebar({ filters, facets, onChange }) {
           Clear filters
         </button>
       )}
+
+      <div className="filter-group">
+        <h3>Export</h3>
+        {total !== undefined && total > EXPORT_MAX_IMAGES ? (
+          <p className="filter-empty">
+            {total} results — narrow the filters to at most {EXPORT_MAX_IMAGES}{' '}
+            to export.
+          </p>
+        ) : (
+          <a
+            className={`download-button${total ? '' : ' disabled'}`}
+            href={total ? exportUrl : undefined}
+            aria-disabled={!total}
+          >
+            Download{total !== undefined ? ` (${total})` : ''}
+          </a>
+        )}
+        <p className="filter-hint">Images + FOMO/YOLO COCO annotations</p>
+      </div>
     </aside>
   )
 }

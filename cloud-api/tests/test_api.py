@@ -187,6 +187,46 @@ def test_parse_label_filters_normalizes() -> None:
     assert parse_label_filters(" Dog ,person,,DOG ") == ["dog", "person"]
 
 
+def test_build_coco_dataset() -> None:
+    from app.services.detection_service import build_coco_dataset
+
+    rows = [
+        {
+            "s3_key": "detections/2026/07/16/aaa.jpg",
+            "metadata": {
+                "frame_width": 320,
+                "frame_height": 240,
+                "fomo_detections": [
+                    {"label": "dog", "confidence": 0.45, "bbox": [141, 51, 8, 8]},
+                    {"label": "dog", "bbox": "not-a-box"},
+                ],
+            },
+        },
+        {
+            # Negative sample: listed in images[], no annotations.
+            "s3_key": "detections/2026/07/16/bbb.jpg",
+            "metadata": {"frame_width": 320, "frame_height": 240},
+        },
+    ]
+
+    dataset = build_coco_dataset(rows, "fomo_detections", "test export")
+
+    assert [img["file_name"] for img in dataset["images"]] == ["aaa.jpg", "bbb.jpg"]
+    assert dataset["images"][0] == {
+        "id": 1,
+        "file_name": "aaa.jpg",
+        "width": 320,
+        "height": 240,
+    }
+    assert len(dataset["annotations"]) == 1
+    annotation = dataset["annotations"][0]
+    assert annotation["bbox"] == [141, 51, 8, 8]
+    assert annotation["area"] == 64
+    assert annotation["image_id"] == 1
+    assert annotation["score"] == 0.45
+    assert dataset["categories"] == [{"id": 1, "name": "dog"}]
+
+
 @pytest.mark.asyncio
 async def test_detections_require_api_key_when_configured(monkeypatch) -> None:
     import dataclasses

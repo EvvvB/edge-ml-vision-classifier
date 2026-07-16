@@ -52,3 +52,17 @@ export function detectionImageUrl(imageId) {
   const query = key ? `?key=${encodeURIComponent(key)}` : ''
   return `/detections/${imageId}/image${query}`
 }
+
+// Downloads are browser navigations (no headers), so the key rides along as a
+// query parameter here too.
+export function exportDownloadUrl(params) {
+  const url = new URL('/detections/export', window.location.origin)
+  for (const [name, value] of Object.entries(params ?? {})) {
+    if (value !== undefined && value !== null && value !== '') {
+      url.searchParams.set(name, value)
+    }
+  }
+  const key = getStoredKey()
+  if (key) url.searchParams.set('key', key)
+  return url.pathname + url.search
+}

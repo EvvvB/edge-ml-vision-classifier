@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -229,6 +231,159 @@ async def get_detection_facets(
     validate_filter_value("source", source, VALID_SOURCE_FILTERS)
     facets = await fetch_detection_facets(db, device_id=device_id, source=source)
     return {"ok": True, **facets}
+
+
+EXPORT_MAX_IMAGES = 1000
+
+
+def build_coco_dataset(
+    rows: list[dict[str, Any]],
+    detections_key: str,
+    description: str,
+) -> dict[str, Any]:
+    """Assemble a COCO object-detection dataset from stored detection rows.
+
+    Images without annotations stay in images[] — that is how COCO
+    represents negative samples.
+    """
+    categories: dict[str, int] = {}
+    images: list[dict[str, Any]] = []
+    annotations: list[dict[str, Any]] = []
+    annotation_id = 1
+
+    for image_number, row in enumerate(rows, start=1):
+        metadata = row.get("metadata") or {}
+        images.append(
+            {
+                "id": image_number,
+                "file_name": Path(row["s3_key"]).name,
+                "width": metadata.get("frame_width") or 0,
+                "height": metadata.get("frame_height") or 0,
+            }
+        )
+
+        entries = metadata.get(detections_key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            bbox = entry.get("bbox")
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                continue
+            label = str(entry.get("label") or "object")
+            category_id = categories.setdefault(label, len(categories) + 1)
+            annotation: dict[str, Any] = {
+                "id": annotation_id,
+                "image_id": image_number,
+                "category_id": category_id,
+                "bbox": bbox,
+                "area": bbox[2] * bbox[3],
+                "iscrowd": 0,
+            }
+            if isinstance(entry.get("confidence"), (int, float)):
+                annotation["score"] = entry["confidence"]
+            annotations.append(annotation)
+            annotation_id += 1
+
+    return {
+        "info": {"description": description},
+        "images": images,
+        "annotations": annotations,
+        "categories": [
+            {"id": category_id, "name": name}
+            for name, category_id in categories.items()
+        ],
+    }
+
+
+async def export_detections(
+    db: asyncpg.Pool,
+    s3_client: Any,
+    device_id: str | None,
+    labels: str | None,
+    detections: str,
+    source: str,
+) -> Response:
+    validate_filter_value("detections", detections, VALID_DETECTION_FILTERS)
+    validate_filter_value("source", source, VALID_SOURCE_FILTERS)
+
+    rows, total = await fetch_detections(
+        db,
+        device_id=device_id,
+        labels=parse_label_filters(labels),
+        detections=detections,
+        source=source,
+        limit=EXPORT_MAX_IMAGES + 1,
+        offset=0,
+    )
+    if total > EXPORT_MAX_IMAGES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"export matches {total} detections; narrow the filters to at "
+                f"most {EXPORT_MAX_IMAGES}"
+            ),
+        )
+
+    stored = [row for row in rows if row["upload_status"] == "stored"]
+    exported: list[dict[str, Any]] = []
+    missing_images = 0
+
+    buffer = io.BytesIO()
+    # JPEGs don't recompress; ZIP_STORED keeps CPU cost near zero.
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        for row in stored:
+            try:
+                image = await download_image(
+                    s3_client=s3_client,
+                    bucket=row["s3_bucket"],
+                    key=row["s3_key"],
+                )
+            except ClientError:
+                missing_images += 1
+                continue
+            archive.writestr(f"images/{Path(row['s3_key']).name}", image["body"])
+            exported.append(row)
+
+        generated_at = datetime.now(UTC).isoformat()
+        for source_name in ("fomo", "yolo"):
+            dataset = build_coco_dataset(
+                exported,
+                f"{source_name}_detections",
+                f"{source_name.upper()} detections export ({generated_at})",
+            )
+            archive.writestr(
+                f"{source_name}.coco.json",
+                json.dumps(dataset, indent=2),
+            )
+
+        archive.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "generated_at": generated_at,
+                    "query": {
+                        "device_id": device_id,
+                        "labels": parse_label_filters(labels),
+                        "detections": detections,
+                        "source": source,
+                    },
+                    "matched": total,
+                    "exported_images": len(exported),
+                    "skipped_not_stored": len(rows) - len(stored),
+                    "skipped_missing_from_s3": missing_images,
+                },
+                indent=2,
+            ),
+        )
+
+    filename = f"detections-export-{datetime.now(UTC):%Y-%m-%d}.zip"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def parse_metadata(raw_metadata: str) -> dict[str, Any]:

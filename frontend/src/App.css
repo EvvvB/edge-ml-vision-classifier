@@ -149,6 +149,29 @@
   font-size: 13px;
 }
 
+.download-button {
+  display: block;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #0b1016;
+  font-weight: 600;
+  font-size: 14px;
+  text-align: center;
+  text-decoration: none;
+}
+
+.download-button.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.filter-hint {
+  margin: 8px 0 0;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
 .sparkline-value {
   margin: 0 0 6px;
   font-size: 14px;
