@@ -48,3 +48,35 @@ async def test_upload_rejects_unsupported_content_type(monkeypatch) -> None:
 
     assert response.status_code == 400
     assert "unsupported image type" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_detections_require_api_key_when_configured(monkeypatch) -> None:
+    import dataclasses
+
+    import app.api.detections as detections
+
+    pool = Mock()
+    monkeypatch.setattr(main, "create_db_pool", AsyncMock(return_value=pool))
+    monkeypatch.setattr(main, "init_db", AsyncMock())
+    monkeypatch.setattr(main, "close_db_pool", AsyncMock())
+    monkeypatch.setattr(main, "create_s3_client", Mock(return_value=Mock()))
+    monkeypatch.setattr(
+        detections,
+        "settings",
+        dataclasses.replace(detections.settings, api_key="test-key"),
+    )
+
+    transport = httpx.ASGITransport(app=main.app)
+    async with main.lifespan(main.app):
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            missing = await client.get("/detections")
+            wrong = await client.get("/detections", headers={"X-API-Key": "nope"})
+            health = await client.get("/health")
+
+    assert missing.status_code == 401
+    assert wrong.status_code == 401
+    assert health.status_code == 200

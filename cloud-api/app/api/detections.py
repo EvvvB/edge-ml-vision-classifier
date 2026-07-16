@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import secrets
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, File, Form, Request, UploadFile
-from starlette.status import HTTP_201_CREATED
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.security import APIKeyHeader
+from starlette.status import HTTP_201_CREATED, HTTP_401_UNAUTHORIZED
 
 from app.services.detection_service import (
     get_detection,
@@ -18,8 +20,26 @@ from app.storage.s3 import check_s3
 
 router = APIRouter()
 
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-@router.post("/detections", status_code=HTTP_201_CREATED)
+
+async def require_api_key(provided: str | None = Depends(api_key_header)) -> None:
+    # Auth is enforced only when CLOUD_API_KEY is configured, so local
+    # development without a key keeps working.
+    if not settings.api_key:
+        return
+    if provided is None or not secrets.compare_digest(provided, settings.api_key):
+        raise HTTPException(
+            status_code=HTTP_401_UNAUTHORIZED,
+            detail="invalid or missing API key",
+        )
+
+
+@router.post(
+    "/detections",
+    status_code=HTTP_201_CREATED,
+    dependencies=[Depends(require_api_key)],
+)
 async def receive_detection(
     request: Request,
     image: UploadFile = File(...),
@@ -33,12 +53,12 @@ async def receive_detection(
     )
 
 
-@router.get("/detections/{image_id}")
+@router.get("/detections/{image_id}", dependencies=[Depends(require_api_key)])
 async def read_detection(request: Request, image_id: UUID) -> dict[str, Any]:
     return await get_detection(request.app.state.db, image_id=image_id)
 
 
-@router.get("/detections")
+@router.get("/detections", dependencies=[Depends(require_api_key)])
 async def read_detections(
     request: Request,
     device_id: str | None = None,

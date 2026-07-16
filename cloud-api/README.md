@@ -66,6 +66,11 @@ curl -X POST http://127.0.0.1:8000/detections \
 
 Successful responses include the generated `image_id`, S3 bucket, S3 key, and `s3://` URL.
 
+When `CLOUD_API_KEY` is set (always in production), every `/detections`
+endpoint requires a matching `X-API-Key` header and returns 401 without it.
+`/health` and `/ready` stay unauthenticated. Leave `CLOUD_API_KEY` unset for
+local development to disable the check.
+
 ## Read stored metadata
 
 ```bash

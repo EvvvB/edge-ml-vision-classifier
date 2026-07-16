@@ -25,6 +25,7 @@ class Settings:
             "postgresql://vision:vision@localhost:5432/vision_classifier",
         ),
     )
+    api_key: str = os.getenv("CLOUD_API_KEY", "")
     s3_bucket: str = os.getenv("CLOUD_S3_BUCKET", os.getenv("S3_BUCKET", ""))
     s3_prefix: str = os.getenv("CLOUD_S3_PREFIX", "detections")
     s3_endpoint_url: str | None = os.getenv("CLOUD_S3_ENDPOINT_URL") or None
