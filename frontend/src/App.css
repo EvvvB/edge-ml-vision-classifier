@@ -411,6 +411,52 @@ button.ghost:hover {
   color: var(--chip-color);
 }
 
+.tile-simulator {
+  margin-top: 12px;
+}
+
+.tile-simulator-header {
+  display: flex;
+  gap: 8px;
+}
+
+.tile-grid {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.tile {
+  margin: 0;
+}
+
+.tile-image-wrap {
+  position: relative;
+}
+
+.tile-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.tile img {
+  width: 100%;
+  border-radius: 4px;
+  cursor: pointer;
+  /* Tiles are tiny model-input frames; show their real pixels when scaled up. */
+  image-rendering: pixelated;
+}
+
+.tile figcaption {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
 .modal-fields {
   display: grid;
   grid-template-columns: auto 1fr;

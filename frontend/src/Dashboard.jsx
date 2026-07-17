@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { apiFetch, detectionImageUrl, exportDownloadUrl } from './api.js'
 import FilterSidebar from './Filters.jsx'
+import TileSimulator from './TileSimulator.jsx'
 import { filtersFromUrl, syncFiltersToUrl } from './filterState.js'
 
 const PAGE_SIZE = 24
@@ -373,6 +374,9 @@ function DetectionModal({ detection, onClose }) {
               </svg>
             )}
           </div>
+        )}
+        {stored && (
+          <TileSimulator imageId={detection.image_id} metadata={metadata} />
         )}
         <dl className="modal-fields">
           <dt>Captured</dt>
