@@ -142,6 +142,12 @@ export default function FilterSidebar({
             className={`download-button${total ? '' : ' disabled'}`}
             href={total ? exportUrl : undefined}
             aria-disabled={!total}
+            onClick={(event) => {
+              const message = `Download ${total} image${
+                total === 1 ? '' : 's'
+              } with COCO annotations as a ZIP?`
+              if (!window.confirm(message)) event.preventDefault()
+            }}
           >
             Download{total !== undefined ? ` (${total})` : ''}
           </a>
