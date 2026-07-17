@@ -20,7 +20,7 @@ export class ApiError extends Error {
   }
 }
 
-export async function apiFetch(path, { params } = {}) {
+export async function apiFetch(path, { params, method } = {}) {
   const url = new URL(path, window.location.origin)
   for (const [name, value] of Object.entries(params ?? {})) {
     if (value !== undefined && value !== null && value !== '') {
@@ -30,6 +30,7 @@ export async function apiFetch(path, { params } = {}) {
 
   const key = getStoredKey()
   const response = await fetch(url, {
+    method: method ?? 'GET',
     headers: key ? { 'X-API-Key': key } : {},
   })
 
@@ -43,6 +44,12 @@ export async function apiFetch(path, { params } = {}) {
     throw new ApiError(response.status, detail)
   }
   return response.json()
+}
+
+export function requestCapture(deviceId) {
+  return apiFetch(`/devices/${encodeURIComponent(deviceId)}/capture`, {
+    method: 'POST',
+  })
 }
 
 // <img> tags cannot send headers, so the image endpoint takes the key as a

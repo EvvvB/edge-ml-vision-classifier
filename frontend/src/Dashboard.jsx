@@ -1,6 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { apiFetch, detectionImageUrl, exportDownloadUrl } from './api.js'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  apiFetch,
+  detectionImageUrl,
+  exportDownloadUrl,
+  requestCapture,
+} from './api.js'
 import FilterSidebar from './Filters.jsx'
 import TileSimulator from './TileSimulator.jsx'
 import { filtersFromUrl, syncFiltersToUrl } from './filterState.js'
@@ -91,9 +96,16 @@ export default function Dashboard({ onAuthError, onLock }) {
     <div className="dashboard">
       <header className="dashboard-header">
         <h1>Vision Classifier</h1>
-        <button type="button" className="ghost" onClick={onLock}>
-          Lock
-        </button>
+        <div className="header-actions">
+          <CaptureButton
+            deviceId={
+              filters.deviceId || facetsQuery.data?.devices?.[0]?.device_id
+            }
+          />
+          <button type="button" className="ghost" onClick={onLock}>
+            Lock
+          </button>
+        </div>
       </header>
 
       <div className="dashboard-body">
@@ -154,6 +166,61 @@ export default function Dashboard({ onAuthError, onLock }) {
         />
       )}
     </div>
+  )
+}
+
+function CaptureButton({ deviceId }) {
+  const queryClient = useQueryClient()
+  const [status, setStatus] = useState('idle')
+  const timeoutsRef = useRef([])
+
+  useEffect(
+    () => () => timeoutsRef.current.forEach(clearTimeout),
+    [],
+  )
+
+  const schedule = (fn, ms) => {
+    timeoutsRef.current.push(setTimeout(fn, ms))
+  }
+
+  async function handleCapture() {
+    setStatus('requesting')
+    try {
+      await requestCapture(deviceId)
+      setStatus('requested')
+      // The frame takes several seconds to travel Nicla -> Pi -> cloud;
+      // refresh the grid a couple of times so it appears without waiting
+      // for the 30s poll.
+      for (const delay of [6000, 14000]) {
+        schedule(() => {
+          queryClient.invalidateQueries({ queryKey: ['detections'] })
+          queryClient.invalidateQueries({ queryKey: ['facets'] })
+        }, delay)
+      }
+      schedule(() => setStatus('idle'), 5000)
+    } catch {
+      setStatus('error')
+      schedule(() => setStatus('idle'), 5000)
+    }
+  }
+
+  const labels = {
+    idle: 'Capture photo',
+    requesting: 'Requesting…',
+    requested: 'Capture requested ✓',
+    error: 'Capture failed',
+  }
+
+  return (
+    <button
+      type="button"
+      className={`capture-button${status === 'error' ? ' error' : ''}`}
+      onClick={handleCapture}
+      disabled={!deviceId || status === 'requesting' || status === 'requested'}
+      title={deviceId ? `Capture a frame from ${deviceId}` : 'No device known yet'}
+    >
+      {labels[status]}
+    </button>
   )
 }
 

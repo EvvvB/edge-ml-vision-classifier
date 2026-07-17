@@ -205,6 +205,31 @@
   }
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.capture-button {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent);
+  color: #0b1016;
+  font-weight: 600;
+}
+
+.capture-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.capture-button.error {
+  background: var(--error);
+  color: #fff;
+}
+
 button.ghost {
   padding: 8px 14px;
   border-radius: 8px;

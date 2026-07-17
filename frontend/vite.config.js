@@ -13,6 +13,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/detections': 'http://localhost:8000',
+      '/devices': 'http://localhost:8000',
       '/health': 'http://localhost:8000',
     },
   },
