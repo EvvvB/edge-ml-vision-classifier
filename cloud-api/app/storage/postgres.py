@@ -58,6 +58,18 @@ async def init_db(pool: asyncpg.Pool) -> None:
             ON detections (device_id)
             """
         )
+        # Monotonic per-device press counter for manual capture requests. The
+        # counter value itself is the command: devices compare it against a
+        # high-water mark, so retries and replays are naturally idempotent.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS capture_requests (
+                device_id TEXT PRIMARY KEY,
+                counter BIGINT NOT NULL DEFAULT 0,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
 
 
 async def insert_detection_upload(
@@ -161,6 +173,30 @@ async def fetch_detection(
             image_id,
         )
     return serialize_row(row) if row else None
+
+
+async def increment_capture_counter(pool: asyncpg.Pool, device_id: str) -> int:
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            INSERT INTO capture_requests (device_id, counter)
+            VALUES ($1, 1)
+            ON CONFLICT (device_id)
+            DO UPDATE SET counter = capture_requests.counter + 1,
+                          updated_at = now()
+            RETURNING counter
+            """,
+            device_id,
+        )
+
+
+async def fetch_capture_counter(pool: asyncpg.Pool, device_id: str) -> int:
+    async with pool.acquire() as conn:
+        counter = await conn.fetchval(
+            "SELECT counter FROM capture_requests WHERE device_id = $1",
+            device_id,
+        )
+    return counter or 0
 
 
 DETECTION_SOURCES = ("fomo", "yolo")
