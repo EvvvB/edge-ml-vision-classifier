@@ -13,6 +13,7 @@ from PIL import Image
 
 from app.config import settings
 from app.inference.model import predict_image
+from app.services.capture_relay import remember_device_address
 from app.services.cloud_forwarder import forward_detection
 from app.services.coco import normalize_fomo_detections, normalize_yolo_detections
 from app.services.tile_dedupe import deduplicate_tile_detections
@@ -23,10 +24,17 @@ async def receive_detection_upload(
     image: UploadFile,
     raw_metadata: str,
     background_tasks: BackgroundTasks,
+    client_host: str | None = None,
 ) -> dict[str, Any]:
     parsed_metadata = deduplicate_tile_detections(parse_metadata(raw_metadata))
     device_metadata, fomo_detections = split_device_detections(parsed_metadata)
     image_id = uuid4().hex
+
+    # Uploads reveal the device's LAN address, which is where the manual
+    # capture trigger gets sent later.
+    device_id = parsed_metadata.get("device_id")
+    if client_host and device_id:
+        remember_device_address(str(device_id), client_host)
 
     if image.content_type in settings.allowed_raw_image_types:
         image_path, metadata_path = await save_raw_upload(

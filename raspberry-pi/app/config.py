@@ -43,5 +43,21 @@ class Settings:
         os.environ.get("CLOUD_FORWARD_RETRY_SECONDS", "2")
     )
 
+    # Manual capture relay: the Pi subscribes to the cloud API's capture
+    # stream (SSE) and forwards each press to the Nicla as a UDP datagram on
+    # the LAN. Requires CLOUD_API_URL; the trigger target defaults to the
+    # address the device last uploaded from.
+    capture_device_id: str = os.environ.get("CAPTURE_DEVICE_ID", "nicla-vision-01")
+    nicla_udp_host: str = os.environ.get("NICLA_UDP_HOST", "")
+    nicla_udp_port: int = int(os.environ.get("NICLA_UDP_PORT", "5005"))
+    # Datagrams are cheap and duplicates are idempotent on the Nicla, so each
+    # press is sent a few times to ride out packet loss.
+    capture_udp_repeats: int = int(os.environ.get("CAPTURE_UDP_REPEATS", "3"))
+    # Must comfortably exceed the cloud stream's 20s heartbeat interval so a
+    # healthy but quiet stream is not treated as dead.
+    capture_stream_read_timeout_seconds: float = float(
+        os.environ.get("CAPTURE_STREAM_READ_TIMEOUT_SECONDS", "45")
+    )
+
 
 settings = Settings()

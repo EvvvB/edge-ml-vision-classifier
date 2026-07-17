@@ -65,6 +65,24 @@ The outcome lands in the local metadata JSON as `cloud_sync_status`
 success and `cloud_sync_error` holding the reason on failure. A forwarding
 failure never blocks or fails the local pipeline.
 
+## Manual capture relay
+
+When `CLOUD_API_URL` is set, the Pi also holds an SSE connection to the cloud
+API's `/devices/{device_id}/capture/stream` endpoint. Each dashboard
+"Capture photo" press increments a monotonic counter in the cloud; the Pi
+relays every increase to the Nicla as a UDP datagram (`snap:<counter>`) on
+the LAN, repeated a few times because the firmware dedupes by counter. The
+target address is learned from the device's most recent upload and persisted
+in `metadata/device_addresses.json`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CAPTURE_DEVICE_ID` | `nicla-vision-01` | Device whose capture stream to subscribe to |
+| `NICLA_UDP_HOST` | last upload's source address | Static trigger target override |
+| `NICLA_UDP_PORT` | `5005` | Firmware's trigger listener port |
+| `CAPTURE_UDP_REPEATS` | `3` | Datagrams sent per press |
+| `CAPTURE_STREAM_READ_TIMEOUT_SECONDS` | `45` | Stream considered dead without traffic for this long |
+
 ## Run at boot (systemd)
 
 [deploy/vision-receiver.service](deploy/vision-receiver.service) runs the
