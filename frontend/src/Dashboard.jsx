@@ -9,6 +9,7 @@ import {
 import FilterSidebar from './Filters.jsx'
 import TileSimulator from './TileSimulator.jsx'
 import { filtersFromUrl, syncFiltersToUrl } from './filterState.js'
+import { isLocalEnvironment } from './env.js'
 
 const PAGE_SIZE = 24
 const POLL_INTERVAL_MS = 30_000
@@ -95,7 +96,10 @@ export default function Dashboard({ onAuthError, onLock }) {
   return (
     <div className="dashboard">
       <header className="dashboard-header">
-        <h1>Vision Classifier</h1>
+        <h1>
+          Vision Classifier
+          {isLocalEnvironment && <span className="env-badge">local</span>}
+        </h1>
         <div className="header-actions">
           <CaptureButton
             deviceId={

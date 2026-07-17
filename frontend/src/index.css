@@ -18,6 +18,32 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* Local/dev environments swap the accent to amber and warm the surfaces so
+   the two environments can never be mistaken for each other. */
+:root[data-env='local'] {
+  --bg: #15120d;
+  --surface: #1e1a13;
+  --surface-raised: #272217;
+  --border: #3a3120;
+  --accent: #f2a65a;
+}
+
+/* Hazard-striped top edge on every screen, key gate included. */
+:root[data-env='local'] body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  z-index: 100;
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--accent) 0 12px,
+    transparent 12px 24px
+  );
+}
+
 * {
   box-sizing: border-box;
 }

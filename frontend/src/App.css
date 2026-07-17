@@ -205,6 +205,19 @@
   }
 }
 
+.env-badge {
+  margin-left: 10px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  vertical-align: 3px;
+}
+
 .header-actions {
   display: flex;
   align-items: center;
