@@ -136,6 +136,22 @@ UPLOAD_FAILURE_LED_ON_MS = 1500
 
 
 # ---------------------------------------------------------
+# Manual capture trigger settings
+# ---------------------------------------------------------
+
+# The Raspberry Pi relays dashboard capture presses as UDP datagrams of the
+# form b"snap:<counter>", where <counter> is the cloud's monotonic press
+# count. Comparing counters against a high-water mark makes duplicate and
+# stale datagrams harmless, so the Pi can retransmit freely.
+CAPTURE_UDP_PORT = 5005
+
+# Upper bound on frames queued from one counter jump. Protects against a
+# runaway backlog if this device reboots and later sees a much larger
+# counter than the one it remembers.
+CAPTURE_MAX_BURST_FRAMES = 3
+
+
+# ---------------------------------------------------------
 # Wireless image-transfer settings
 # ---------------------------------------------------------
 
@@ -329,6 +345,110 @@ def wait_for_initial_wifi():
 
 
 # ---------------------------------------------------------
+# Manual capture trigger
+# ---------------------------------------------------------
+
+capture_socket = None
+capture_high_water = 0
+pending_manual_captures = 0
+
+
+def ensure_capture_socket():
+    global capture_socket
+
+    if capture_socket is not None:
+        return True
+
+    try:
+        if not wlan.isconnected():
+            return False
+
+        new_socket = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_DGRAM
+        )
+        new_socket.bind(("0.0.0.0", CAPTURE_UDP_PORT))
+        new_socket.setblocking(False)
+
+    except Exception as error:
+        debug_print("Capture socket setup failed:", error)
+        return False
+
+    capture_socket = new_socket
+    print("Capture trigger listening on UDP port", CAPTURE_UDP_PORT)
+    return True
+
+
+def parse_capture_counter(payload):
+    try:
+        text = payload.decode("utf-8").strip()
+    except Exception:
+        return None
+
+    if not text.startswith("snap:"):
+        return None
+
+    try:
+        return int(text[len("snap:"):])
+    except ValueError:
+        return None
+
+
+def poll_capture_trigger():
+    """Drain pending trigger datagrams and queue owed captures.
+
+    Each datagram reports the total number of presses so far. Anything at
+    or below the high-water mark is a duplicate or a stale straggler and
+    contributes nothing; an increase queues the difference, clamped so a
+    reboot cannot create a huge backlog.
+    """
+    global capture_high_water
+    global pending_manual_captures
+
+    if not ensure_capture_socket():
+        return
+
+    highest_seen = 0
+
+    while True:
+        try:
+            payload, _sender = capture_socket.recvfrom(64)
+        except OSError:
+            # Non-blocking socket with nothing queued.
+            break
+
+        counter = parse_capture_counter(payload)
+
+        if counter is not None and counter > highest_seen:
+            highest_seen = counter
+
+    if highest_seen <= capture_high_water:
+        return
+
+    if capture_high_water == 0:
+        # First trigger since boot: the true backlog is unknowable, so
+        # count it as a single press.
+        queued_frames = 1
+    else:
+        queued_frames = min(
+            highest_seen - capture_high_water,
+            CAPTURE_MAX_BURST_FRAMES
+        )
+
+    capture_high_water = highest_seen
+    pending_manual_captures += queued_frames
+
+    debug_print(
+        "Manual capture queued:",
+        queued_frames,
+        "| pending:",
+        pending_manual_captures,
+        "| counter:",
+        capture_high_water
+    )
+
+
+# ---------------------------------------------------------
 # HTTP upload helpers
 # ---------------------------------------------------------
 
@@ -349,7 +469,8 @@ def build_detection_metadata(
     frame_width,
     frame_height,
     image_encoding,
-    image_byte_count
+    image_byte_count,
+    trigger
 ):
     metadata_detections = []
 
@@ -389,6 +510,7 @@ def build_detection_metadata(
         "version": 1,
         "device_id": DEVICE_ID,
         "transport": "wifi_http",
+        "trigger": trigger,
         "image_encoding": image_encoding,
         "image_content_type": "application/octet-stream",
         "image_byte_count": image_byte_count,
@@ -533,7 +655,7 @@ def image_dimension(img, dimension_name, fallback):
         return fallback
 
 
-def send_detection_image(img, detections):
+def send_detection_image(img, detections, trigger="detection"):
     if not ensure_wifi_connected():
         return False
 
@@ -583,7 +705,8 @@ def send_detection_image(img, detections):
             upload_width,
             upload_height,
             image_encoding,
-            image_byte_count
+            image_byte_count,
+            trigger
         )
         metadata_bytes = json.dumps(metadata).encode("utf-8")
 
@@ -856,6 +979,12 @@ while True:
     now = time.ticks_ms()
 
     # -----------------------------------------------------
+    # Manual capture trigger
+    # -----------------------------------------------------
+
+    poll_capture_trigger()
+
+    # -----------------------------------------------------
     # Detection LED
     # -----------------------------------------------------
 
@@ -888,19 +1017,30 @@ while True:
         >= UPLOAD_COOLDOWN_MS
     )
 
-    should_upload = (
-        total_detections > 0
-        and upload_cooldown_complete
-        and wireless_configured()
+    # Manual captures bypass the detection gate and the cooldown: the
+    # user asked for this frame, so it uploads even when nothing was
+    # detected. One frame is consumed per queued press.
+    manual_capture_due = pending_manual_captures > 0
+
+    should_upload = wireless_configured() and (
+        manual_capture_due
+        or (total_detections > 0 and upload_cooldown_complete)
     )
 
     if should_upload:
         upload_succeeded = False
 
+        if manual_capture_due:
+            # Consume the press even if the upload fails; retrying
+            # forever would starve detection uploads, and the failure
+            # LED tells the user to press again.
+            pending_manual_captures -= 1
+
         try:
             upload_succeeded = send_detection_image(
                 img,
-                detections_to_draw
+                detections_to_draw,
+                trigger="manual" if manual_capture_due else "detection"
             )
 
         except Exception as error:

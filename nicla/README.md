@@ -17,6 +17,13 @@ The wireless upload format is `multipart/form-data` sent to `POST /detections`:
 The current firmware captures HVGA (`480x320`) RGB565 frames. The Nicla sends
 raw bytes over Wi-Fi, and the Raspberry Pi receiver converts them to JPEG.
 
+Besides detection-driven uploads, the firmware listens on UDP port `5005`
+for manual capture triggers of the form `snap:<counter>` (sent by the
+Raspberry Pi when the dashboard's "Capture photo" button is pressed). The
+counter is the cloud's total press count; the firmware keeps a high-water
+mark, so duplicate or stale datagrams never cause extra uploads, and one
+frame is uploaded per press with `"trigger": "manual"` in its metadata.
+
 Copy the example Wi-Fi config and edit it for your local network:
 
 ```bash
