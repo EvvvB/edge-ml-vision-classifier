@@ -82,6 +82,27 @@ router does not have client isolation enabled.
 Then open `firmware/main.py` in OpenMV IDE and save both `main.py` and
 `wifi_config.py` to the Nicla.
 
+## Model versioning
+
+Deployed models are archived under `nicla/models/`, one folder per version
+holding the Edge Impulse export (`trained.tflite`, `labels.txt`) plus a
+hand-written `model_manifest.json`. Deploying a version means copying all
+three files to the Nicla's flash filesystem; see `nicla/models/README.md`
+for the folder layout and manifest format.
+
+At boot the firmware SHA-256 hashes `trained.tflite` and reads the
+manifest, and every upload's metadata then carries both:
+
+- `model_hash`: first 12 hex chars of the model file's SHA-256. This is
+  the ground-truth model identity — two uploads share a hash only when
+  byte-identical models produced them.
+- `model_manifest`: the manifest JSON verbatim (version label, training
+  date, notes). Omitted when no manifest file is present.
+
+Both fields flow through the Raspberry Pi untouched and land in the cloud
+database's `metadata` JSONB column, so analysis can group or filter
+detections by model version.
+
 ## Receiver
 
 `receiver/receive_nicla_images.py` is the older USB dataset-capture receiver.

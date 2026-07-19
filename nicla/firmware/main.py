@@ -29,6 +29,8 @@ import math
 import image
 import pyb
 import json
+import binascii
+import hashlib
 import network
 import socket
 import gc
@@ -726,10 +728,14 @@ def build_detection_metadata(
         ],
 
         "minimum_confidence": MIN_CONFIDENCE,
+        "model_hash": model_hash,
         "nicla_uptime_ms": time.ticks_ms(),
         "detection_count": len(metadata_detections),
         "detections": metadata_detections
     }
+
+    if model_manifest is not None:
+        metadata["model_manifest"] = model_manifest
 
     if inference_mode == "full_sweep":
         # The Pi's tile dedupe interprets "tile" as a grid position, so
@@ -953,12 +959,79 @@ def send_detection_image(
 # Load model
 # ---------------------------------------------------------
 
+MODEL_FILE_PATH = "trained.tflite"
+MODEL_MANIFEST_PATH = "model_manifest.json"
+
+# Truncated SHA-256 still uniquely identifies the handful of models
+# this project will ever train, and keeps upload metadata small.
+MODEL_HASH_HEX_CHARS = 12
+
+
+def compute_model_hash(path):
+    """Hash of the deployed model file's exact bytes.
+
+    The hash is the ground-truth model identity for analysis: two
+    uploads share a hash only when byte-identical models produced
+    them, even if the manifest was forgotten or wrong. Reading in
+    chunks keeps the boot-time allocation small.
+    """
+    try:
+        sha = hashlib.sha256()
+
+        with open(path, "rb") as model_file:
+            while True:
+                chunk = model_file.read(1024)
+
+                if not chunk:
+                    break
+
+                sha.update(chunk)
+
+        digest_hex = binascii.hexlify(sha.digest()).decode("utf-8")
+        return digest_hex[:MODEL_HASH_HEX_CHARS]
+
+    except Exception as error:
+        print("Model hash unavailable:", error)
+        return None
+
+
+def load_model_manifest(path):
+    """Human-readable model info deployed alongside the model file.
+
+    The manifest carries what the hash cannot: version label, training
+    date, notes. It is optional so firmware still runs on devices that
+    predate the convention.
+    """
+    try:
+        with open(path) as manifest_file:
+            manifest = json.load(manifest_file)
+
+    except OSError:
+        print("No model manifest found:", path)
+        return None
+
+    except ValueError as error:
+        print("Model manifest is not valid JSON:", error)
+        return None
+
+    if not isinstance(manifest, dict):
+        print("Model manifest ignored: expected a JSON object")
+        return None
+
+    return manifest
+
+
 model = ml.Model("trained")
+
+model_hash = compute_model_hash(MODEL_FILE_PATH)
+model_manifest = load_model_manifest(MODEL_MANIFEST_PATH)
 
 debug_print(model)
 debug_print("Model input:", model.input_shape)
 debug_print("Model output:", model.output_shape)
 debug_print("Labels:", model.labels)
+debug_print("Model hash:", model_hash)
+debug_print("Model manifest:", model_manifest)
 
 
 colors = [
