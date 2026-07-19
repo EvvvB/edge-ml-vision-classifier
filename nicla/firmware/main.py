@@ -1,6 +1,11 @@
-# Edge Impulse / OpenMV FOMO tiled object detection
+# Edge Impulse / OpenMV FOMO motion-gated object detection
 #
-# 2 rows x 3 columns = 6 inferences per frame
+# Frame differencing against a downscaled copy of the previous frame
+# finds up to MOTION_MAX_CROPS changed regions, and the model runs only
+# on those crops. A full 2x3 tile sweep still runs on the first frame,
+# on manual captures, when the whole frame changed (lighting shift),
+# and every FULL_SWEEP_INTERVAL_MS as a safety net, because
+# differencing cannot see an object once it stops moving.
 #
 # Wireless upload format:
 #   HTTP POST multipart/form-data to POST /detections
@@ -89,6 +94,21 @@ sensor.set_pixformat(sensor.RGB565)
 sensor.set_framesize(sensor.HVGA)  # 480 x 320 detection frame
 sensor.skip_frames(time=2000)
 
+# Frame differencing compares raw pixel values across frames, so the
+# sensor's automatic adjustments must stay frozen or every exposure
+# step reads as whole-frame motion. Locking after skip_frames keeps
+# whatever the warmup converged on. Not every control exists on every
+# sensor, so failures are only reported.
+for lock_sensor_auto in (
+    lambda: sensor.set_auto_gain(False),
+    lambda: sensor.set_auto_exposure(False),
+    lambda: sensor.set_auto_whitebal(False),
+):
+    try:
+        lock_sensor_auto()
+    except Exception as error:
+        print("Sensor auto-lock unsupported:", error)
+
 
 # ---------------------------------------------------------
 # Detection settings
@@ -116,10 +136,188 @@ GRID_ROWS = 2
 TILE_OVERLAP_PIXELS = 16
 
 DRAW_TILE_GRID = True
-DRAW_TILE_ROIS = True
+DRAW_INFERENCE_ROIS = True
 DRAW_DETECTIONS = True
 
 FRAME_DELAY_MS = 0
+
+
+# ---------------------------------------------------------
+# Motion-gated inference settings
+# ---------------------------------------------------------
+
+# Differencing runs on a grayscale copy downscaled by this factor, so
+# the retained previous frame costs 120 x 80 = 9.6 KB instead of a
+# second 307 KB RGB565 frame.
+MOTION_DOWNSCALE = 4
+
+SMALL_WIDTH = FRAME_WIDTH // MOTION_DOWNSCALE
+SMALL_HEIGHT = FRAME_HEIGHT // MOTION_DOWNSCALE
+
+# Minimum per-pixel intensity delta (0-255) that counts as change.
+MOTION_DIFF_THRESHOLD = 24
+
+# Measured at the downscaled resolution, where one pixel covers a
+# MOTION_DOWNSCALE x MOTION_DOWNSCALE block of the full frame.
+MOTION_BLOB_MIN_PIXELS = 12
+
+MOTION_MAX_CROPS = 3
+
+# Crops match the model's 96 x 96 input exactly, so inference sees
+# full sensor detail with no downscaling. Training data should be
+# prepared with matching 96 x 96 object-centered crops.
+CROP_SIZE = 96
+
+# When changed pixels cover this fraction of the frame the difference
+# is global (lighting shift, exposure step), not an object entering;
+# fall back to a full tile sweep instead of trusting the blobs.
+MOTION_GLOBAL_CHANGE_FRACTION = 0.4
+
+# Differencing cannot see an object once it stops moving, so a full
+# tile sweep still runs at this interval as a safety net.
+FULL_SWEEP_INTERVAL_MS = 5000
+
+
+# ---------------------------------------------------------
+# Motion differencing
+# ---------------------------------------------------------
+
+current_small = sensor.alloc_extra_fb(
+    SMALL_WIDTH,
+    SMALL_HEIGHT,
+    sensor.GRAYSCALE
+)
+
+previous_small = sensor.alloc_extra_fb(
+    SMALL_WIDTH,
+    SMALL_HEIGHT,
+    sensor.GRAYSCALE
+)
+
+background_valid = False
+
+motion_diff_thresholds = [
+    (MOTION_DIFF_THRESHOLD, 255)
+]
+
+
+def downscale_into(img, destination):
+    # draw_image converts RGB565 to the destination's grayscale format
+    # while scaling; AREA averaging keeps small motion from aliasing
+    # away entirely.
+    destination.draw_image(
+        img,
+        0,
+        0,
+        x_scale=SMALL_WIDTH / FRAME_WIDTH,
+        y_scale=SMALL_HEIGHT / FRAME_HEIGHT,
+        hint=image.AREA
+    )
+
+
+def point_in_roi(x, y, roi):
+    roi_x, roi_y, roi_width, roi_height = roi
+
+    return (
+        roi_x <= x < roi_x + roi_width
+        and roi_y <= y < roi_y + roi_height
+    )
+
+
+def crop_roi_around(center_x, center_y):
+    """Fixed-size square crop centered on a point, clamped to the frame."""
+    half = CROP_SIZE // 2
+
+    x = min(
+        max(center_x - half, 0),
+        FRAME_WIDTH - CROP_SIZE
+    )
+
+    y = min(
+        max(center_y - half, 0),
+        FRAME_HEIGHT - CROP_SIZE
+    )
+
+    return (x, y, CROP_SIZE, CROP_SIZE)
+
+
+def detect_motion_regions(img):
+    """Diff against the previous downscaled frame.
+
+    Returns (crop_rois, global_change). Crop coordinates are in full
+    frame pixels. global_change is True when the diff cannot be trusted
+    to isolate objects: the first frame after boot, or a change so large
+    it must be lighting rather than something entering the scene.
+    """
+    global background_valid
+
+    downscale_into(img, current_small)
+
+    if not background_valid:
+        previous_small.replace(current_small)
+        background_valid = True
+        return [], True
+
+    # difference() mutates in place. Consuming previous_small keeps the
+    # buffer count at two: its old contents become the diff, then the
+    # current frame is stored into it for the next iteration.
+    previous_small.difference(current_small)
+
+    blobs = previous_small.find_blobs(
+        motion_diff_thresholds,
+        pixels_threshold=MOTION_BLOB_MIN_PIXELS,
+        area_threshold=MOTION_BLOB_MIN_PIXELS,
+        merge=True,
+        margin=4
+    )
+
+    previous_small.replace(current_small)
+
+    if not blobs:
+        return [], False
+
+    changed_pixels = 0
+
+    for blob in blobs:
+        changed_pixels += blob.pixels()
+
+    global_change_pixels = (
+        MOTION_GLOBAL_CHANGE_FRACTION * SMALL_WIDTH * SMALL_HEIGHT
+    )
+
+    if changed_pixels >= global_change_pixels:
+        return [], True
+
+    crop_rois = []
+
+    largest_first = sorted(
+        blobs,
+        key=lambda candidate: candidate.pixels(),
+        reverse=True
+    )
+
+    for blob in largest_first:
+        if len(crop_rois) >= MOTION_MAX_CROPS:
+            break
+
+        center_x = blob.cx() * MOTION_DOWNSCALE
+        center_y = blob.cy() * MOTION_DOWNSCALE
+
+        covered = False
+
+        for existing_roi in crop_rois:
+            if point_in_roi(center_x, center_y, existing_roi):
+                covered = True
+                break
+
+        if covered:
+            continue
+
+        crop_rois.append(
+            crop_roi_around(center_x, center_y)
+        )
+
+    return crop_rois, False
 
 
 # ---------------------------------------------------------
@@ -470,7 +668,9 @@ def build_detection_metadata(
     frame_height,
     image_encoding,
     image_byte_count,
-    trigger
+    trigger,
+    inference_mode,
+    inference_rois
 ):
     metadata_detections = []
 
@@ -483,15 +683,18 @@ def build_detection_metadata(
             center_x,
             center_y,
             color,
-            tile_number,
+            roi_number,
             label,
             score
         ) = detection
 
+        # Boxes and centers are always in full-frame pixels; the NMS
+        # step maps model output through the inference ROI, so crop
+        # mode needs no extra offsetting here.
         metadata_detections.append({
             "label": str(label),
             "score": float(score),
-            "tile": int(tile_number),
+            "tile": int(roi_number),
 
             "box": [
                 int(x),
@@ -506,7 +709,7 @@ def build_detection_metadata(
             ]
         })
 
-    return {
+    metadata = {
         "version": 1,
         "device_id": DEVICE_ID,
         "transport": "wifi_http",
@@ -516,13 +719,27 @@ def build_detection_metadata(
         "image_byte_count": image_byte_count,
         "frame_width": frame_width,
         "frame_height": frame_height,
-        "grid_columns": GRID_COLUMNS,
-        "grid_rows": GRID_ROWS,
+        "inference_mode": inference_mode,
+
+        "inference_rois": [
+            list(roi) for roi in inference_rois
+        ],
+
         "minimum_confidence": MIN_CONFIDENCE,
         "nicla_uptime_ms": time.ticks_ms(),
         "detection_count": len(metadata_detections),
         "detections": metadata_detections
     }
+
+    if inference_mode == "full_sweep":
+        # The Pi's tile dedupe interprets "tile" as a grid position, so
+        # only sweep uploads advertise grid geometry; without it the
+        # dedupe stays inert for crop uploads, whose ROI indexes are
+        # not grid cells.
+        metadata["grid_columns"] = GRID_COLUMNS
+        metadata["grid_rows"] = GRID_ROWS
+
+    return metadata
 
 
 def parse_http_url(url):
@@ -655,7 +872,13 @@ def image_dimension(img, dimension_name, fallback):
         return fallback
 
 
-def send_detection_image(img, detections, trigger="detection"):
+def send_detection_image(
+    img,
+    detections,
+    trigger,
+    inference_mode,
+    inference_rois
+):
     if not ensure_wifi_connected():
         return False
 
@@ -706,7 +929,9 @@ def send_detection_image(img, detections, trigger="detection"):
             upload_height,
             image_encoding,
             image_byte_count,
-            trigger
+            trigger,
+            inference_mode,
+            inference_rois
         )
         metadata_bytes = json.dumps(metadata).encode("utf-8")
 
@@ -894,6 +1119,11 @@ last_detection_led_ms = time.ticks_add(
     -DETECTION_LED_COOLDOWN_MS
 )
 
+last_full_sweep_ms = time.ticks_add(
+    time.ticks_ms(),
+    -FULL_SWEEP_INTERVAL_MS
+)
+
 
 # ---------------------------------------------------------
 # Main loop
@@ -904,20 +1134,56 @@ while True:
 
     img = sensor.snapshot()
 
+    now = time.ticks_ms()
+
+    # Polled before mode selection so a pending manual capture can
+    # force a full sweep, giving user-requested frames complete
+    # annotations rather than only motion crops.
+    poll_capture_trigger()
+
+    manual_capture_due = pending_manual_captures > 0
+
     total_detections = 0
     detections_to_draw = []
 
     # -----------------------------------------------------
-    # Run inference on all six tiles
+    # Choose inference regions for this frame
     # -----------------------------------------------------
 
-    for tile_number, tile_roi in enumerate(tile_rois):
-        tile_input = Normalization(
-            roi=tile_roi
+    motion_rois, global_change = detect_motion_regions(img)
+
+    full_sweep_due = (
+        time.ticks_diff(
+            now,
+            last_full_sweep_ms
+        )
+        >= FULL_SWEEP_INTERVAL_MS
+    )
+
+    if manual_capture_due or global_change or full_sweep_due:
+        inference_mode = "full_sweep"
+        inference_rois = tile_rois
+        last_full_sweep_ms = now
+    elif motion_rois:
+        inference_mode = "motion_crops"
+        inference_rois = motion_rois
+    else:
+        # Nothing changed since the previous frame; skip inference
+        # entirely.
+        inference_mode = "idle"
+        inference_rois = []
+
+    # -----------------------------------------------------
+    # Run inference on the chosen regions
+    # -----------------------------------------------------
+
+    for roi_number, inference_roi in enumerate(inference_rois):
+        roi_input = Normalization(
+            roi=inference_roi
         )(img)
 
         results = model.predict(
-            [tile_input],
+            [roi_input],
             callback=fomo_post_process
         )
 
@@ -955,7 +1221,7 @@ while True:
                         center_x,
                         center_y,
                         color,
-                        tile_number,
+                        roi_number,
                         label,
                         score
                     )
@@ -964,8 +1230,9 @@ while True:
                 total_detections += 1
 
                 debug_print(
-                    "tile",
-                    tile_number,
+                    inference_mode,
+                    "roi",
+                    roi_number,
                     "class",
                     label,
                     "x",
@@ -975,14 +1242,6 @@ while True:
                     "score",
                     score
                 )
-
-    now = time.ticks_ms()
-
-    # -----------------------------------------------------
-    # Manual capture trigger
-    # -----------------------------------------------------
-
-    poll_capture_trigger()
 
     # -----------------------------------------------------
     # Detection LED
@@ -1020,8 +1279,6 @@ while True:
     # Manual captures bypass the detection gate and the cooldown: the
     # user asked for this frame, so it uploads even when nothing was
     # detected. One frame is consumed per queued press.
-    manual_capture_due = pending_manual_captures > 0
-
     should_upload = wireless_configured() and (
         manual_capture_due
         or (total_detections > 0 and upload_cooldown_complete)
@@ -1040,7 +1297,9 @@ while True:
             upload_succeeded = send_detection_image(
                 img,
                 detections_to_draw,
-                trigger="manual" if manual_capture_due else "detection"
+                "manual" if manual_capture_due else "detection",
+                inference_mode,
+                inference_rois
             )
 
         except Exception as error:
@@ -1119,7 +1378,7 @@ while True:
     # Draw tile grid
     # -----------------------------------------------------
 
-        if DRAW_TILE_GRID:
+        if DRAW_TILE_GRID and inference_mode == "full_sweep":
             for column in range(1, GRID_COLUMNS):
                 grid_x = (
                     column * FRAME_WIDTH
@@ -1146,14 +1405,14 @@ while True:
                     color=(255, 255, 255)
                 )
 
-        if DRAW_TILE_ROIS:
-            for tile_roi in tile_rois:
+        if DRAW_INFERENCE_ROIS:
+            for inference_roi in inference_rois:
                 (
                     roi_x,
                     roi_y,
                     roi_width,
                     roi_height
-                ) = tile_roi
+                ) = inference_roi
 
                 img.draw_rectangle(
                     roi_x,
@@ -1168,9 +1427,13 @@ while True:
         debug_print("Skipping annotation draw:", error)
 
     debug_print(
-        "detections:",
+        "mode:",
+        inference_mode,
+        "| rois:",
+        len(inference_rois),
+        "| detections:",
         total_detections,
-        "| tiled frames/sec:",
+        "| frames/sec:",
         clock.fps()
     )
 

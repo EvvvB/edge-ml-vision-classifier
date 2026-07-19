@@ -5,9 +5,21 @@ This folder contains the code used on and around the Arduino Nicla Vision.
 ## Firmware
 
 `firmware/main.py` runs on the Nicla through OpenMV firmware. It continuously
-captures camera frames, runs the trained Edge Impulse/OpenMV FOMO model over a
-2-by-3 tile grid, and sends detected frames plus JSON metadata over Wi-Fi to a
-REST API.
+captures camera frames and diffs each one against a downscaled grayscale copy
+of the previous frame to find changed regions. The trained Edge Impulse/OpenMV
+FOMO model runs only on fixed-size crops around those regions (up to 3 per
+frame) instead of a full sweep, and detected frames plus JSON metadata are
+sent over Wi-Fi to a REST API.
+
+A full 2-by-3 tile-grid sweep still runs on the first frame, on manual
+captures, when the whole frame changes at once (lighting shifts), and every
+few seconds as a safety net, since frame differencing cannot see an object
+once it stops moving. Each upload's metadata reports which mode produced it
+(`inference_mode`: `full_sweep` or `motion_crops`) and the regions inspected
+(`inference_rois`); detection boxes are always in full-frame pixels either
+way. Grid geometry (`grid_columns`/`grid_rows`) is only included on sweep
+uploads, which keeps the Pi's cross-tile dedupe from misreading crop indexes
+as grid positions.
 
 The wireless upload format is `multipart/form-data` sent to `POST /detections`:
 
