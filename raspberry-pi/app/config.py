@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,6 +58,31 @@ class Settings:
     # healthy but quiet stream is not treated as dead.
     capture_stream_read_timeout_seconds: float = float(
         os.environ.get("CAPTURE_STREAM_READ_TIMEOUT_SECONDS", "45")
+    )
+
+    # Device gateway: the Pi answers camera hellos, relays them to the
+    # cloud, pushes desired-mode changes over UDP until acked, and damps
+    # heartbeat/preview chatter before it reaches the WAN.
+    pi_id: str = os.environ.get("PI_ID", socket.gethostname())
+    # The camera's boot sequence is held open during the relay, so this
+    # stays short; on timeout the Pi answers from its cached state.
+    hello_relay_timeout_seconds: float = float(
+        os.environ.get("HELLO_RELAY_TIMEOUT_SECONDS", "2")
+    )
+    mode_push_retry_base_seconds: float = float(
+        os.environ.get("MODE_PUSH_RETRY_BASE_SECONDS", "1")
+    )
+    mode_push_retry_max_seconds: float = float(
+        os.environ.get("MODE_PUSH_RETRY_MAX_SECONDS", "30")
+    )
+    seen_relay_interval_seconds: float = float(
+        os.environ.get("SEEN_RELAY_INTERVAL_SECONDS", "300")
+    )
+    preview_forward_min_interval_seconds: float = float(
+        os.environ.get("PREVIEW_FORWARD_MIN_INTERVAL_SECONDS", "1")
+    )
+    preview_max_bytes: int = int(
+        os.environ.get("PREVIEW_MAX_BYTES", str(1024 * 1024))
     )
 
 

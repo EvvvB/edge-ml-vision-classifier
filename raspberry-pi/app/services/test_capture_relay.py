@@ -12,11 +12,11 @@ async def stream_of(lines: list[str]):
         yield line
 
 
-def collect_counters(lines: list[str]) -> list[int]:
-    async def run() -> list[int]:
+def collect_events(lines: list[str]) -> list[dict]:
+    async def run() -> list[dict]:
         return [
-            counter
-            async for counter in capture_relay.iter_sse_counters(stream_of(lines))
+            event
+            async for event in capture_relay.iter_sse_events(stream_of(lines))
         ]
 
     return asyncio.run(run())
@@ -31,7 +31,20 @@ def test_parses_counter_events_and_ignores_heartbeats() -> None:
         'data: {"device_id": "nicla-vision-01", "counter": 4}',
         "",
     ]
-    assert collect_counters(lines) == [3, 4]
+    assert [event["counter"] for event in collect_events(lines)] == [3, 4]
+
+
+def test_parses_mode_fields_when_present() -> None:
+    lines = [
+        'data: {"counter": 5, "mode": "positioning", "mode_seq": 2}',
+        "",
+        'data: {"counter": 5, "mode": "bogus", "mode_seq": 3}',
+        "",
+    ]
+    events = collect_events(lines)
+    assert events[0] == {"counter": 5, "mode": "positioning", "mode_seq": 2}
+    # An unknown mode value is dropped; the counter still comes through.
+    assert events[1] == {"counter": 5}
 
 
 def test_ignores_malformed_event_data() -> None:
@@ -43,7 +56,7 @@ def test_ignores_malformed_event_data() -> None:
         'data: {"counter": 9}',
         "",
     ]
-    assert collect_counters(lines) == [9]
+    assert collect_events(lines) == [{"counter": 9}]
 
 
 def test_device_addresses_persist_and_reload(tmp_path, monkeypatch) -> None:
@@ -65,7 +78,7 @@ def test_device_addresses_persist_and_reload(tmp_path, monkeypatch) -> None:
     ("data_lines", "expected"),
     [
         ([], None),
-        (['{"counter": "12"}'], 12),
+        (['{"counter": "12"}'], {"counter": 12}),
         (['{"counter": null}'], None),
     ],
 )

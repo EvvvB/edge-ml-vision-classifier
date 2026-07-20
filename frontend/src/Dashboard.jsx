@@ -1,11 +1,8 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
-import {
-  apiFetch,
-  detectionImageUrl,
-  exportDownloadUrl,
-  requestCapture,
-} from './api.js'
+import { Fragment, useEffect, useMemo, useState } from 'react'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { apiFetch, detectionImageUrl, exportDownloadUrl } from './api.js'
+import DeviceManager from './DeviceManager.jsx'
+import DevicesPanel, { isPositioning } from './DevicesPanel.jsx'
 import FilterSidebar from './Filters.jsx'
 import TileSimulator from './TileSimulator.jsx'
 import { filtersFromUrl, syncFiltersToUrl } from './filterState.js'
@@ -13,6 +10,7 @@ import { isLocalEnvironment } from './env.js'
 
 const PAGE_SIZE = 24
 const POLL_INTERVAL_MS = 30_000
+const DEVICES_POLL_INTERVAL_MS = 10_000
 
 function filterParams(filters) {
   return {
@@ -58,6 +56,14 @@ function useFacets(filters) {
   })
 }
 
+function useDevices() {
+  return useQuery({
+    queryKey: ['devices'],
+    queryFn: () => apiFetch('/devices'),
+    refetchInterval: DEVICES_POLL_INTERVAL_MS,
+  })
+}
+
 function formatTimestamp(value) {
   if (!value) return '—'
   const date = new Date(value)
@@ -68,6 +74,7 @@ function formatTimestamp(value) {
 export default function Dashboard({ onAuthError, onLock }) {
   const [filters, setFilters] = useState(filtersFromUrl)
   const [selected, setSelected] = useState(null)
+  const [view, setView] = useState('detections')
   const {
     data,
     error,
@@ -77,22 +84,38 @@ export default function Dashboard({ onAuthError, onLock }) {
     fetchNextPage,
   } = useDetections(filters)
   const facetsQuery = useFacets(filters)
+  const devicesQuery = useDevices()
 
   useEffect(() => {
     syncFiltersToUrl(filters)
   }, [filters])
 
   useEffect(() => {
-    if (error?.status === 401 || facetsQuery.error?.status === 401) {
+    if (
+      error?.status === 401 ||
+      facetsQuery.error?.status === 401 ||
+      devicesQuery.error?.status === 401
+    ) {
       onAuthError()
     }
-  }, [error, facetsQuery.error, onAuthError])
+  }, [error, facetsQuery.error, devicesQuery.error, onAuthError])
 
   const detections = useMemo(
     () => (data ? data.pages.flatMap((page) => page.detections) : []),
     [data],
   )
   const total = data?.pages[0]?.total
+  const devices = devicesQuery.data?.devices ?? []
+  const positioningDevices = devices.filter(isPositioning)
+
+  const toggleModelFilter = (hash) => {
+    setFilters((current) => ({
+      ...current,
+      models: current.models.includes(hash)
+        ? current.models.filter((entry) => entry !== hash)
+        : [...current.models, hash].sort(),
+    }))
+  }
 
   return (
     <div className="dashboard">
@@ -101,17 +124,48 @@ export default function Dashboard({ onAuthError, onLock }) {
           Vision Classifier
           {isLocalEnvironment && <span className="env-badge">local</span>}
         </h1>
+        <nav className="view-tabs" aria-label="Dashboard view">
+          {[
+            ['detections', 'Detections'],
+            ['devices', 'Devices'],
+          ].map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={`view-tab${view === value ? ' active' : ''}`}
+              onClick={() => setView(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
         <div className="header-actions">
-          <CaptureButton
-            deviceId={
-              filters.deviceId || facetsQuery.data?.devices?.[0]?.device_id
-            }
-          />
           <button type="button" className="ghost" onClick={onLock}>
             Lock
           </button>
         </div>
       </header>
+
+      {positioningDevices.length > 0 && (
+        <div className="positioning-banner">
+          Positioning mode:{' '}
+          {positioningDevices.map((device) => device.device_id).join(', ')} —
+          automated capture is paused
+        </div>
+      )}
+
+      {view === 'devices' && (
+        <DeviceManager
+          devices={devices}
+          isPending={devicesQuery.isPending}
+        />
+      )}
+
+      <div
+        className="dashboard-view"
+        style={view === 'detections' ? undefined : { display: 'none' }}
+      >
+      <DevicesPanel devices={devices} onModelFilter={toggleModelFilter} />
 
       <div className="dashboard-body">
         <FilterSidebar
@@ -163,6 +217,7 @@ export default function Dashboard({ onAuthError, onLock }) {
           )}
         </main>
       </div>
+      </div>
 
       {selected && (
         <DetectionModal
@@ -171,61 +226,6 @@ export default function Dashboard({ onAuthError, onLock }) {
         />
       )}
     </div>
-  )
-}
-
-function CaptureButton({ deviceId }) {
-  const queryClient = useQueryClient()
-  const [status, setStatus] = useState('idle')
-  const timeoutsRef = useRef([])
-
-  useEffect(
-    () => () => timeoutsRef.current.forEach(clearTimeout),
-    [],
-  )
-
-  const schedule = (fn, ms) => {
-    timeoutsRef.current.push(setTimeout(fn, ms))
-  }
-
-  async function handleCapture() {
-    setStatus('requesting')
-    try {
-      await requestCapture(deviceId)
-      setStatus('requested')
-      // The frame takes several seconds to travel Nicla -> Pi -> cloud;
-      // refresh the grid a couple of times so it appears without waiting
-      // for the 30s poll.
-      for (const delay of [6000, 14000]) {
-        schedule(() => {
-          queryClient.invalidateQueries({ queryKey: ['detections'] })
-          queryClient.invalidateQueries({ queryKey: ['facets'] })
-        }, delay)
-      }
-      schedule(() => setStatus('idle'), 5000)
-    } catch {
-      setStatus('error')
-      schedule(() => setStatus('idle'), 5000)
-    }
-  }
-
-  const labels = {
-    idle: 'Capture photo',
-    requesting: 'Requesting…',
-    requested: 'Capture requested ✓',
-    error: 'Capture failed',
-  }
-
-  return (
-    <button
-      type="button"
-      className={`capture-button${status === 'error' ? ' error' : ''}`}
-      onClick={handleCapture}
-      disabled={!deviceId || status === 'requesting' || status === 'requested'}
-      title={deviceId ? `Capture a frame from ${deviceId}` : 'No device known yet'}
-    >
-      {labels[status]}
-    </button>
   )
 }
 

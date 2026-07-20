@@ -21,6 +21,7 @@ from app.storage.postgres import (
     insert_detection_upload,
     mark_detection_failed,
     mark_detection_stored,
+    touch_device_upload,
 )
 from app.storage.s3 import download_image, upload_image
 
@@ -92,6 +93,20 @@ async def receive_detection_upload(
         image_id=image_id,
         s3_etag=upload_result.get("ETag"),
     )
+
+    if device_id:
+        # Registry bookkeeping must never fail an upload; the detection is
+        # already stored either way.
+        manifest = parsed_metadata.get("model_manifest")
+        try:
+            await touch_device_upload(
+                db,
+                device_id=device_id,
+                model_hash=optional_string(parsed_metadata.get("model_hash")),
+                model_manifest=manifest if isinstance(manifest, dict) else None,
+            )
+        except Exception:
+            pass
 
     return {
         "ok": True,

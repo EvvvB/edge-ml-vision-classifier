@@ -7,6 +7,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 
 from app.api.detections import router as detections_router
+from app.api.devices import router as devices_router
 from app.config import settings
 from app.services.capture_relay import capture_stream_worker
 
@@ -31,3 +32,4 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Edge ML Vision Classifier", lifespan=lifespan)
 app.include_router(detections_router)
+app.include_router(devices_router)

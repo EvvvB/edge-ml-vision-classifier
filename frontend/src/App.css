@@ -224,6 +224,252 @@
   gap: 10px;
 }
 
+/* --- View tabs --- */
+
+.view-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.view-tab {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.view-tab.active {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+/* --- Device manager --- */
+
+.device-manager-hint {
+  margin: 0 0 14px;
+  color: var(--text-dim);
+  font-size: 13px;
+  max-width: 70ch;
+}
+
+.device-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.device-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.device-table th,
+.device-table td {
+  text-align: left;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.device-table tr:last-child td {
+  border-bottom: none;
+}
+
+.device-table th {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.device-table-sub {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+button.ghost.danger {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+button.ghost.danger:hover {
+  color: #fff;
+  background: var(--error);
+}
+
+button.ghost:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* --- Devices panel --- */
+
+.positioning-banner {
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid #d9a441;
+  background: color-mix(in srgb, #d9a441 14%, transparent);
+  color: #d9a441;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.devices-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+  margin-bottom: 24px;
+}
+
+.device-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.device-card.positioning {
+  border-color: #d9a441;
+}
+
+/* Offline reads at a glance: dashed outline, washed-out body, slashed
+   dot, and an explicit badge. The header stays at full contrast so the
+   name and "seen X ago" remain legible. */
+.device-card.offline {
+  border-style: dashed;
+  background: transparent;
+}
+
+.device-card.offline .device-card-row,
+.device-card.offline .device-preview {
+  opacity: 0.4;
+  filter: grayscale(1);
+}
+
+.offline-badge {
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1px dashed var(--text-dim);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.device-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.device-name {
+  font-weight: 600;
+}
+
+.device-seen {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.presence-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.presence-dot.green {
+  background: #6fd08c;
+}
+
+.presence-dot.amber {
+  background: #d9a441;
+}
+
+.presence-dot.gray {
+  /* A slash through the dot: "no signal", not just a dim light. */
+  background:
+    linear-gradient(
+      135deg,
+      transparent 42%,
+      var(--text-dim) 42%,
+      var(--text-dim) 58%,
+      transparent 58%
+    ),
+    var(--border);
+}
+
+.device-card-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.device-firmware {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+}
+
+.mode-toggle {
+  display: flex;
+  gap: 6px;
+}
+
+.mode-pending {
+  color: #d9a441;
+  font-size: 12px;
+}
+
+.device-card .chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.device-card .capture-button {
+  margin-left: auto;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.device-preview {
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.device-preview img {
+  display: block;
+  width: 100%;
+}
+
+.device-preview-empty {
+  margin: 0;
+  padding: 18px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
 .capture-button {
   padding: 8px 14px;
   border-radius: 8px;

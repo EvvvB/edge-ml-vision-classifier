@@ -49,6 +49,19 @@ class Settings:
         if origin.strip()
     )
 
+    # Device platform: positioning auto-expires so a forgotten pause cannot
+    # silence a camera indefinitely; preview frames live only in memory and
+    # vanish shortly after the camera stops sending them.
+    positioning_ttl_seconds: float = float(
+        os.getenv("POSITIONING_TTL_SECONDS", str(30 * 60))
+    )
+    preview_expiry_seconds: float = float(
+        os.getenv("PREVIEW_EXPIRY_SECONDS", "10")
+    )
+    preview_max_bytes: int = int(
+        os.getenv("PREVIEW_MAX_BYTES", str(1024 * 1024))
+    )
+
     @property
     def normalized_s3_prefix(self) -> str:
         return self.s3_prefix.strip("/")

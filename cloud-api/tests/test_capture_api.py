@@ -37,6 +37,19 @@ async def test_capture_request_increments_counter(monkeypatch) -> None:
     assert response.json() == {"device_id": "nicla-vision-01", "counter": 7}
 
 
+def patch_stream_state(monkeypatch, mode="automated", mode_seq=0) -> None:
+    monkeypatch.setattr(
+        capture_service,
+        "expire_stale_positioning",
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        capture_service,
+        "fetch_desired_mode",
+        AsyncMock(return_value=(mode, mode_seq)),
+    )
+
+
 # httpx's ASGITransport buffers whole response bodies, so an endless SSE
 # response cannot be consumed through it; the generator is tested directly.
 @pytest.mark.asyncio
@@ -52,6 +65,7 @@ async def test_capture_stream_sends_snapshot_then_updates(monkeypatch) -> None:
         "increment_capture_counter",
         AsyncMock(return_value=4),
     )
+    patch_stream_state(monkeypatch)
 
     broadcaster = capture_service.CaptureBroadcaster()
     stream = capture_service.capture_event_stream(
@@ -73,9 +87,55 @@ async def test_capture_stream_sends_snapshot_then_updates(monkeypatch) -> None:
     await asyncio.wait_for(reader, timeout=5)
 
     assert events == [
-        {"device_id": "nicla-vision-01", "counter": 3},
-        {"device_id": "nicla-vision-01", "counter": 4},
+        {
+            "device_id": "nicla-vision-01",
+            "counter": 3,
+            "mode": "automated",
+            "mode_seq": 0,
+        },
+        {
+            "device_id": "nicla-vision-01",
+            "counter": 4,
+            "mode": "automated",
+            "mode_seq": 0,
+        },
     ]
+
+
+@pytest.mark.asyncio
+async def test_capture_stream_emits_on_mode_change(monkeypatch) -> None:
+    monkeypatch.setattr(
+        capture_service,
+        "fetch_capture_counter",
+        AsyncMock(return_value=5),
+    )
+    modes = iter([("automated", 0), ("positioning", 1)])
+    monkeypatch.setattr(
+        capture_service,
+        "expire_stale_positioning",
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        capture_service,
+        "fetch_desired_mode",
+        AsyncMock(side_effect=lambda pool, device_id: next(modes)),
+    )
+    monkeypatch.setattr(capture_service, "HEARTBEAT_SECONDS", 0.05)
+
+    broadcaster = capture_service.CaptureBroadcaster()
+    stream = capture_service.capture_event_stream(
+        Mock(), broadcaster, "nicla-vision-01"
+    )
+
+    first = await anext(stream)
+    # The counter is unchanged, so this event must be driven by the mode
+    # seq alone.
+    second = await asyncio.wait_for(anext(stream), timeout=5)
+
+    assert json.loads(first[len("data:") :])["mode"] == "automated"
+    payload = json.loads(second[len("data:") :])
+    assert payload["mode"] == "positioning"
+    assert payload["mode_seq"] == 1
 
 
 @pytest.mark.asyncio
@@ -85,6 +145,7 @@ async def test_capture_stream_heartbeats_without_changes(monkeypatch) -> None:
         "fetch_capture_counter",
         AsyncMock(return_value=5),
     )
+    patch_stream_state(monkeypatch)
     monkeypatch.setattr(capture_service, "HEARTBEAT_SECONDS", 0.05)
 
     broadcaster = capture_service.CaptureBroadcaster()
@@ -98,5 +159,7 @@ async def test_capture_stream_heartbeats_without_changes(monkeypatch) -> None:
     assert json.loads(first[len("data:") :]) == {
         "device_id": "nicla-vision-01",
         "counter": 5,
+        "mode": "automated",
+        "mode_seq": 0,
     }
     assert second.startswith(": keepalive")

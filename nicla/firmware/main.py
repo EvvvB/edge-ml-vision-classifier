@@ -343,12 +343,42 @@ UPLOAD_FAILURE_LED_ON_MS = 1500
 # form b"snap:<counter>", where <counter> is the cloud's monotonic press
 # count. Comparing counters against a high-water mark makes duplicate and
 # stale datagrams harmless, so the Pi can retransmit freely.
+#
+# Desired-mode changes arrive on the same socket as b"mode:<seq>:<value>",
+# with the same high-water-mark discipline on <seq>. The Pi resends a mode
+# datagram until this device acknowledges it over HTTP, so delivery relies
+# on repetition, never on any single packet.
 CAPTURE_UDP_PORT = 5005
 
 # Upper bound on frames queued from one counter jump. Protects against a
 # runaway backlog if this device reboots and later sees a much larger
 # counter than the one it remembers.
 CAPTURE_MAX_BURST_FRAMES = 3
+
+
+# ---------------------------------------------------------
+# Device platform settings
+# ---------------------------------------------------------
+
+FIRMWARE_BUILD = "2026-07-19.1"
+
+# Boot hello: registers this device with the Pi (and through it the cloud),
+# fetches the desired mode, and sets the RTC from the server clock. Retried
+# with backoff from the main loop until one succeeds; detection runs in
+# automated mode meanwhile.
+HELLO_RETRY_BASE_MS = 5000
+HELLO_RETRY_MAX_MS = 120000
+
+# An applied mode is confirmed to the Pi over HTTP. The Pi keeps resending
+# the mode datagram until the ack lands, so this retry pace only matters
+# while the Pi is unreachable.
+MODE_ACK_RETRY_MS = 2000
+
+# Positioning mode: automated sweeps and motion inference stop; instead a
+# lean JPEG preview is posted at this cadence so the dashboard shows a
+# slow live view for aiming. Manual captures still run the full pipeline.
+PREVIEW_INTERVAL_MS = 1000
+PREVIEW_JPEG_QUALITY = 60
 
 
 # ---------------------------------------------------------
@@ -552,6 +582,60 @@ capture_socket = None
 capture_high_water = 0
 pending_manual_captures = 0
 
+# Desired-mode state. current_mode gates the main loop; the seq high-water
+# mark makes stale/duplicate datagrams harmless; pending_mode_ack holds an
+# applied (mode, seq) until the confirmation POST to the Pi succeeds.
+current_mode = "automated"
+mode_seq_high_water = 0
+pending_mode_ack = None
+
+
+def apply_mode(mode, seq):
+    """Adopt a desired mode if its seq is new; queue the ack.
+
+    A seq equal to the high-water mark re-queues the ack without changing
+    state: after a Pi restart the push loop knows nothing of past acks, so
+    re-acking the current seq is what lets it go quiet again.
+    """
+    global current_mode
+    global mode_seq_high_water
+    global pending_mode_ack
+    global background_valid
+    global last_full_sweep_ms
+
+    if mode not in ("automated", "positioning"):
+        return
+
+    try:
+        seq = int(seq)
+    except (ValueError, TypeError):
+        return
+
+    if seq < mode_seq_high_water:
+        return
+
+    if seq == mode_seq_high_water:
+        if seq > 0:
+            pending_mode_ack = (mode, seq)
+        return
+
+    mode_seq_high_water = seq
+
+    if mode != current_mode:
+        if current_mode == "positioning":
+            # The camera was likely just physically moved; the motion
+            # baseline is garbage. Rebuild it and sweep immediately.
+            background_valid = False
+            last_full_sweep_ms = time.ticks_add(
+                time.ticks_ms(),
+                -FULL_SWEEP_INTERVAL_MS
+            )
+
+        current_mode = mode
+        print("Mode applied:", mode, "| seq:", seq)
+
+    pending_mode_ack = (mode, seq)
+
 
 def ensure_capture_socket():
     global capture_socket
@@ -579,28 +663,46 @@ def ensure_capture_socket():
     return True
 
 
-def parse_capture_counter(payload):
+def parse_trigger_datagram(payload):
+    """b"snap:<n>" -> ("snap", n); b"mode:<seq>:<value>" -> ("mode", seq, value)."""
     try:
         text = payload.decode("utf-8").strip()
     except Exception:
         return None
 
-    if not text.startswith("snap:"):
-        return None
+    if text.startswith("snap:"):
+        try:
+            return ("snap", int(text[len("snap:"):]))
+        except ValueError:
+            return None
 
-    try:
-        return int(text[len("snap:"):])
-    except ValueError:
-        return None
+    if text.startswith("mode:"):
+        pieces = text.split(":")
+
+        if len(pieces) != 3:
+            return None
+
+        try:
+            seq = int(pieces[1])
+        except ValueError:
+            return None
+
+        if pieces[2] not in ("automated", "positioning"):
+            return None
+
+        return ("mode", seq, pieces[2])
+
+    return None
 
 
 def poll_capture_trigger():
-    """Drain pending trigger datagrams and queue owed captures.
+    """Drain pending trigger datagrams; queue captures and apply modes.
 
-    Each datagram reports the total number of presses so far. Anything at
-    or below the high-water mark is a duplicate or a stale straggler and
+    Each snap datagram reports the total number of presses so far. Anything
+    at or below the high-water mark is a duplicate or a stale straggler and
     contributes nothing; an increase queues the difference, clamped so a
-    reboot cannot create a huge backlog.
+    reboot cannot create a huge backlog. Mode datagrams carry versioned
+    desired state; only the newest drained seq is applied.
     """
     global capture_high_water
     global pending_manual_captures
@@ -609,6 +711,7 @@ def poll_capture_trigger():
         return
 
     highest_seen = 0
+    mode_update = None
 
     while True:
         try:
@@ -617,10 +720,20 @@ def poll_capture_trigger():
             # Non-blocking socket with nothing queued.
             break
 
-        counter = parse_capture_counter(payload)
+        parsed = parse_trigger_datagram(payload)
 
-        if counter is not None and counter > highest_seen:
-            highest_seen = counter
+        if parsed is None:
+            continue
+
+        if parsed[0] == "snap":
+            if parsed[1] > highest_seen:
+                highest_seen = parsed[1]
+
+        elif mode_update is None or parsed[1] > mode_update[0]:
+            mode_update = (parsed[1], parsed[2])
+
+    if mode_update is not None:
+        apply_mode(mode_update[1], mode_update[0])
 
     if highest_seen <= capture_high_water:
         return
@@ -858,6 +971,84 @@ def post_multipart_image(api_url, metadata_bytes, image_bytes):
     )
 
 
+def read_http_response(sock, max_bytes=2048):
+    """Read a small response until the server closes the connection."""
+    chunks = b""
+
+    while len(chunks) < max_bytes:
+        try:
+            chunk = sock.recv(512)
+        except OSError:
+            break
+
+        if not chunk:
+            break
+
+        chunks += chunk
+
+    return chunks
+
+
+def parse_json_response(response_bytes):
+    """Split a raw HTTP response into (status_ok, parsed_json_or_None)."""
+    if not response_bytes:
+        return False, None
+
+    ok = (
+        response_bytes.startswith(b"HTTP/1.1 2")
+        or response_bytes.startswith(b"HTTP/1.0 2")
+    )
+
+    separator = response_bytes.find(b"\r\n\r\n")
+
+    if separator < 0:
+        return ok, None
+
+    try:
+        return ok, json.loads(response_bytes[separator + 4:])
+    except ValueError:
+        return ok, None
+
+
+def post_body(path, content_type, body):
+    """POST a small body to the Pi and return the raw HTTP response.
+
+    All device-platform endpoints live on the same host/port as API_URL,
+    so the base address is reused and only the path differs.
+    """
+    host, port, _ = parse_http_url(API_URL)
+
+    request_header = (
+        "POST " + path + " HTTP/1.1\r\n"
+        "Host: " + host + ":" + str(port) + "\r\n"
+        "Content-Type: " + content_type + "\r\n"
+        "Content-Length: " + str(len(body)) + "\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).encode("utf-8")
+
+    address = socket.getaddrinfo(host, port)[0][-1]
+    sock = socket.socket()
+    sock.settimeout(HTTP_SOCKET_TIMEOUT_SECONDS)
+
+    try:
+        sock.connect(address)
+        send_all(sock, request_header)
+        send_all(sock, body)
+        return read_http_response(sock)
+
+    finally:
+        sock.close()
+
+
+def post_json(path, payload):
+    return post_body(
+        path,
+        "application/json",
+        json.dumps(payload).encode("utf-8")
+    )
+
+
 def raw_image_buffer(img):
     try:
         return img.bytearray()
@@ -1034,6 +1225,200 @@ debug_print("Model hash:", model_hash)
 debug_print("Model manifest:", model_manifest)
 
 
+# ---------------------------------------------------------
+# Device platform: hello, mode ack, tick, preview
+# ---------------------------------------------------------
+
+def hardware_id_hex():
+    """The MCU's factory serial: ground-truth identity for this board.
+
+    device_id is the human label and can collide or move between boards;
+    this cannot, so the registry records both.
+    """
+    try:
+        import machine
+        return binascii.hexlify(machine.unique_id()).decode("utf-8")
+
+    except Exception as error:
+        print("Hardware id unavailable:", error)
+        return None
+
+
+def parse_iso_datetime(text):
+    """(year, month, day, hours, minutes, seconds) from an ISO string.
+
+    The server always sends UTC, so any trailing offset is ignored.
+    """
+    try:
+        date_part, time_part = text.split("T", 1)
+        year, month, day = [int(piece) for piece in date_part.split("-")]
+
+        time_part = time_part.replace("Z", "")
+
+        for offset_sign in ("+", "-"):
+            offset_index = time_part.find(offset_sign)
+
+            if offset_index > 0:
+                time_part = time_part[:offset_index]
+                break
+
+        pieces = time_part.split(":")
+        hours = int(pieces[0])
+        minutes = int(pieces[1])
+        seconds = int(float(pieces[2])) if len(pieces) > 2 else 0
+
+        return year, month, day, hours, minutes, seconds
+
+    except Exception:
+        return None
+
+
+def weekday_from_date(year, month, day):
+    """Sakamoto's algorithm, shifted to the RTC's 1=Monday..7=Sunday."""
+    offsets = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4]
+
+    if month < 3:
+        year -= 1
+
+    weekday_sunday_zero = (
+        year + year // 4 - year // 100 + year // 400
+        + offsets[month - 1] + day
+    ) % 7
+
+    if weekday_sunday_zero == 0:
+        return 7
+
+    return weekday_sunday_zero
+
+
+def set_rtc_from_iso(text):
+    parsed = parse_iso_datetime(text)
+
+    if parsed is None:
+        return False
+
+    year, month, day, hours, minutes, seconds = parsed
+
+    try:
+        pyb.RTC().datetime((
+            year,
+            month,
+            day,
+            weekday_from_date(year, month, day),
+            hours,
+            minutes,
+            seconds,
+            0
+        ))
+        return True
+
+    except Exception as error:
+        print("RTC set failed:", error)
+        return False
+
+
+def send_hello():
+    """Register with the Pi and adopt the answered mode and clock.
+
+    Blocking is fine here: this runs before the loop starts, or between
+    frames on retry, and the Pi answers from cache within a couple of
+    seconds even when the cloud is unreachable.
+    """
+    if not wireless_configured() or not ensure_wifi_connected():
+        return False
+
+    payload = {
+        "device_id": DEVICE_ID,
+        "hardware_id": hardware_id_hex(),
+        "firmware_build": FIRMWARE_BUILD,
+        "model_hash": model_hash
+    }
+
+    if model_manifest is not None:
+        payload["model_manifest"] = model_manifest
+
+    try:
+        response = post_json("/hello", payload)
+    except Exception as error:
+        print("Hello failed:", error)
+        return False
+
+    ok, body = parse_json_response(response)
+
+    if not ok or not isinstance(body, dict):
+        print("Hello rejected:", response)
+        return False
+
+    server_time = body.get("server_time")
+
+    if server_time and set_rtc_from_iso(server_time):
+        debug_print("RTC set from server time:", server_time)
+
+    apply_mode(body.get("mode"), body.get("seq"))
+    print("Hello ok | mode:", current_mode, "| seq:", mode_seq_high_water)
+    return True
+
+
+def send_mode_ack():
+    """Confirm the applied mode to the Pi; kept pending until it lands."""
+    global pending_mode_ack
+
+    if pending_mode_ack is None:
+        return
+
+    mode, seq = pending_mode_ack
+
+    try:
+        response = post_json("/mode-ack", {
+            "device_id": DEVICE_ID,
+            "mode": mode,
+            "seq": seq
+        })
+        ok, _ = parse_json_response(response)
+
+    except Exception as error:
+        debug_print("Mode ack failed:", error)
+        return
+
+    if ok:
+        pending_mode_ack = None
+        debug_print("Mode ack sent:", mode, "| seq:", seq)
+
+
+def send_tick():
+    """Tiny liveness signal for sweeps that found nothing to upload."""
+    try:
+        response = post_json("/tick", {"device_id": DEVICE_ID})
+        ok, _ = parse_json_response(response)
+        return ok
+
+    except Exception as error:
+        debug_print("Tick failed:", error)
+        return False
+
+
+def send_preview_image(img):
+    """Lean positioning preview: JPEG bytes, no metadata envelope.
+
+    compress() mutates the framebuffer in place, which is safe here
+    because positioning frames are never used for inference.
+    """
+    try:
+        jpeg = img.compress(quality=PREVIEW_JPEG_QUALITY)
+        body = raw_image_buffer(jpeg)
+        response = post_body(
+            "/preview?device_id=" + DEVICE_ID,
+            "image/jpeg",
+            body
+        )
+        ok, _ = parse_json_response(response)
+        return ok
+
+    except Exception as error:
+        debug_print("Preview send failed:", error)
+        return False
+
+
 colors = [
     (255, 0, 0),
     (0, 255, 0),
@@ -1197,6 +1582,25 @@ last_full_sweep_ms = time.ticks_add(
     -FULL_SWEEP_INTERVAL_MS
 )
 
+last_preview_ms = time.ticks_add(
+    time.ticks_ms(),
+    -PREVIEW_INTERVAL_MS
+)
+
+last_mode_ack_attempt_ms = time.ticks_add(
+    time.ticks_ms(),
+    -MODE_ACK_RETRY_MS
+)
+
+# The boot hello runs before the first frame; on failure the loop keeps
+# detecting in automated mode and retries with backoff. A camera that
+# cannot reach its Pi should still be a camera.
+hello_retry_delay_ms = HELLO_RETRY_BASE_MS
+
+last_hello_attempt_ms = time.ticks_ms()
+
+hello_pending = wireless_configured() and not send_hello()
+
 
 # ---------------------------------------------------------
 # Main loop
@@ -1214,7 +1618,60 @@ while True:
     # annotations rather than only motion crops.
     poll_capture_trigger()
 
+    if hello_pending and (
+        time.ticks_diff(
+            now,
+            last_hello_attempt_ms
+        )
+        >= hello_retry_delay_ms
+    ):
+        last_hello_attempt_ms = now
+
+        if send_hello():
+            hello_pending = False
+            hello_retry_delay_ms = HELLO_RETRY_BASE_MS
+        else:
+            hello_retry_delay_ms = min(
+                hello_retry_delay_ms * 2,
+                HELLO_RETRY_MAX_MS
+            )
+
+    if pending_mode_ack is not None and (
+        time.ticks_diff(
+            now,
+            last_mode_ack_attempt_ms
+        )
+        >= MODE_ACK_RETRY_MS
+    ):
+        last_mode_ack_attempt_ms = now
+        send_mode_ack()
+
     manual_capture_due = pending_manual_captures > 0
+
+    # -----------------------------------------------------
+    # Positioning mode: preview instead of inference
+    # -----------------------------------------------------
+    #
+    # Sweeps and motion inference stop; a manual capture still falls
+    # through to the full pipeline as the aimed "confirmation shot".
+
+    if current_mode == "positioning" and not manual_capture_due:
+        preview_due = (
+            time.ticks_diff(
+                now,
+                last_preview_ms
+            )
+            >= PREVIEW_INTERVAL_MS
+        )
+
+        if preview_due and wireless_configured():
+            last_preview_ms = now
+            send_preview_image(img)
+
+        if FRAME_DELAY_MS > 0:
+            time.sleep_ms(FRAME_DELAY_MS)
+
+        continue
 
     total_detections = 0
     detections_to_draw = []
@@ -1409,6 +1866,21 @@ while True:
             time.sleep_ms(FRAME_DELAY_MS)
 
         continue
+
+    # -----------------------------------------------------
+    # Presence tick
+    # -----------------------------------------------------
+    #
+    # A sweep that uploads nothing still proves this camera is alive and
+    # looking. Piggybacking on the sweep cadence means a healthy camera
+    # always emits something, so silence has exactly one meaning.
+
+    if (
+        current_mode == "automated"
+        and inference_mode == "full_sweep"
+        and wireless_configured()
+    ):
+        send_tick()
 
     # -----------------------------------------------------
     # Draw detections on non-upload frames

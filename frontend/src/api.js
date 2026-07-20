@@ -20,7 +20,7 @@ export class ApiError extends Error {
   }
 }
 
-export async function apiFetch(path, { params, method } = {}) {
+export async function apiFetch(path, { params, method, body } = {}) {
   const url = new URL(path, window.location.origin)
   for (const [name, value] of Object.entries(params ?? {})) {
     if (value !== undefined && value !== null && value !== '') {
@@ -29,10 +29,13 @@ export async function apiFetch(path, { params, method } = {}) {
   }
 
   const key = getStoredKey()
-  const response = await fetch(url, {
-    method: method ?? 'GET',
-    headers: key ? { 'X-API-Key': key } : {},
-  })
+  const headers = key ? { 'X-API-Key': key } : {}
+  const init = { method: method ?? 'GET', headers }
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+    init.body = JSON.stringify(body)
+  }
+  const response = await fetch(url, init)
 
   if (!response.ok) {
     let detail = response.statusText
@@ -50,6 +53,27 @@ export function requestCapture(deviceId) {
   return apiFetch(`/devices/${encodeURIComponent(deviceId)}/capture`, {
     method: 'POST',
   })
+}
+
+export function setDeviceMode(deviceId, mode) {
+  return apiFetch(`/devices/${encodeURIComponent(deviceId)}/mode`, {
+    method: 'POST',
+    body: { mode },
+  })
+}
+
+export function deleteDevice(deviceId) {
+  return apiFetch(`/devices/${encodeURIComponent(deviceId)}`, {
+    method: 'DELETE',
+  })
+}
+
+// Preview frames render in an <img>, so the key rides as a query parameter
+// like the detection images.
+export function previewImageUrl(deviceId) {
+  const key = getStoredKey()
+  const query = key ? `?key=${encodeURIComponent(key)}` : ''
+  return `/devices/${encodeURIComponent(deviceId)}/preview${query}`
 }
 
 // <img> tags cannot send headers, so the image endpoint takes the key as a

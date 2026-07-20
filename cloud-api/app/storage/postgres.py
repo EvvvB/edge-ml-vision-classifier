@@ -70,6 +70,34 @@ async def init_db(pool: asyncpg.Pool) -> None:
             )
             """
         )
+        # Device registry, upserted from hellos and uploads. desired_mode is
+        # the cloud's command (versioned by desired_mode_seq, the same
+        # high-water-mark pattern as capture counters); reported_mode is what
+        # the device last acked, so the dashboard can show desired vs actual.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS devices (
+                device_id TEXT PRIMARY KEY,
+                hardware_id TEXT,
+                display_name TEXT,
+                firmware_build TEXT,
+                model_hash TEXT,
+                model_manifest JSONB,
+                pi_id TEXT,
+                desired_mode TEXT NOT NULL DEFAULT 'automated',
+                desired_mode_seq BIGINT NOT NULL DEFAULT 0,
+                desired_mode_at TIMESTAMPTZ,
+                reported_mode TEXT,
+                reported_mode_seq BIGINT,
+                reported_mode_at TIMESTAMPTZ,
+                first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                last_hello_at TIMESTAMPTZ,
+                last_upload_at TIMESTAMPTZ,
+                last_seen_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
 
 
 async def insert_detection_upload(
@@ -452,3 +480,252 @@ def serialize_row(row: asyncpg.Record) -> dict[str, Any]:
         if data.get(key) is not None:
             data[key] = str(data[key])
     return data
+
+
+# ---------------------------------------------------------------------------
+# Device registry
+# ---------------------------------------------------------------------------
+
+DEVICE_TIMESTAMP_KEYS = (
+    "desired_mode_at",
+    "reported_mode_at",
+    "first_seen_at",
+    "last_hello_at",
+    "last_upload_at",
+    "last_seen_at",
+    "updated_at",
+)
+
+
+def serialize_device_row(row: asyncpg.Record) -> dict[str, Any]:
+    data = dict(row)
+    if isinstance(data.get("model_manifest"), str):
+        data["model_manifest"] = json.loads(data["model_manifest"])
+    for key in DEVICE_TIMESTAMP_KEYS:
+        if data.get(key) is not None:
+            data[key] = data[key].isoformat()
+    return data
+
+
+async def upsert_device_hello(
+    pool: asyncpg.Pool,
+    *,
+    device_id: str,
+    hardware_id: str | None,
+    firmware_build: str | None,
+    model_hash: str | None,
+    model_manifest: dict[str, Any] | None,
+    pi_id: str | None,
+) -> dict[str, Any]:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO devices (
+                device_id, hardware_id, firmware_build, model_hash,
+                model_manifest, pi_id, last_hello_at, last_seen_at
+            )
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6, now(), now())
+            ON CONFLICT (device_id) DO UPDATE SET
+                hardware_id = coalesce($2, devices.hardware_id),
+                firmware_build = coalesce($3, devices.firmware_build),
+                model_hash = coalesce($4, devices.model_hash),
+                model_manifest = coalesce($5::jsonb, devices.model_manifest),
+                pi_id = coalesce($6, devices.pi_id),
+                last_hello_at = now(),
+                last_seen_at = now(),
+                updated_at = now()
+            RETURNING *
+            """,
+            device_id,
+            hardware_id,
+            firmware_build,
+            model_hash,
+            json.dumps(model_manifest) if model_manifest is not None else None,
+            pi_id,
+        )
+    return serialize_device_row(row)
+
+
+async def touch_device_upload(
+    pool: asyncpg.Pool,
+    *,
+    device_id: str,
+    model_hash: str | None = None,
+    model_manifest: dict[str, Any] | None = None,
+) -> None:
+    # Uploads register devices too, so cameras running pre-hello firmware
+    # still appear in the registry (with model identity when stamped).
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO devices (
+                device_id, model_hash, model_manifest,
+                last_upload_at, last_seen_at
+            )
+            VALUES ($1, $2, $3::jsonb, now(), now())
+            ON CONFLICT (device_id) DO UPDATE SET
+                model_hash = coalesce($2, devices.model_hash),
+                model_manifest = coalesce($3::jsonb, devices.model_manifest),
+                last_upload_at = now(),
+                last_seen_at = now(),
+                updated_at = now()
+            """,
+            device_id,
+            model_hash,
+            json.dumps(model_manifest) if model_manifest is not None else None,
+        )
+
+
+async def touch_device_seen(pool: asyncpg.Pool, device_id: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO devices (device_id, last_seen_at)
+            VALUES ($1, now())
+            ON CONFLICT (device_id) DO UPDATE SET
+                last_seen_at = now(),
+                updated_at = now()
+            """,
+            device_id,
+        )
+
+
+async def expire_stale_positioning(
+    pool: asyncpg.Pool,
+    ttl_seconds: float,
+    device_id: str | None = None,
+) -> int:
+    """Flip desired positioning back to automated once the TTL lapses.
+
+    Called lazily from every read path (hello, SSE stream, device listing),
+    so a forgotten positioning mode cannot outlive the TTL by more than one
+    read. Bumping the seq makes the reversion push out to the device like
+    any other change.
+    """
+    params: list[Any] = [ttl_seconds]
+    device_clause = ""
+    if device_id is not None:
+        params.append(device_id)
+        device_clause = " AND device_id = $2"
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            f"""
+            UPDATE devices
+            SET desired_mode = 'automated',
+                desired_mode_seq = desired_mode_seq + 1,
+                desired_mode_at = now(),
+                updated_at = now()
+            WHERE desired_mode = 'positioning'
+              AND desired_mode_at < now() - $1 * interval '1 second'
+              {device_clause}
+            """,
+            *params,
+        )
+    return int(result.split()[-1])
+
+
+async def fetch_devices(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM devices ORDER BY device_id"
+        )
+    return [serialize_device_row(row) for row in rows]
+
+
+async def fetch_device(
+    pool: asyncpg.Pool,
+    device_id: str,
+) -> dict[str, Any] | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM devices WHERE device_id = $1",
+            device_id,
+        )
+    return serialize_device_row(row) if row else None
+
+
+async def delete_device(pool: asyncpg.Pool, device_id: str) -> bool:
+    """Prune a registry row and its capture counter.
+
+    Detections are untouched: they are the historical record and stay
+    queryable by device filter. A pruned device that hellos again simply
+    re-registers with a fresh row.
+    """
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM devices WHERE device_id = $1",
+            device_id,
+        )
+        await conn.execute(
+            "DELETE FROM capture_requests WHERE device_id = $1",
+            device_id,
+        )
+    return result.split()[-1] != "0"
+
+
+async def set_desired_mode(
+    pool: asyncpg.Pool,
+    *,
+    device_id: str,
+    mode: str,
+) -> dict[str, Any]:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO devices (device_id, desired_mode, desired_mode_seq,
+                                 desired_mode_at)
+            VALUES ($1, $2, 1, now())
+            ON CONFLICT (device_id) DO UPDATE SET
+                desired_mode = $2,
+                desired_mode_seq = devices.desired_mode_seq + 1,
+                desired_mode_at = now(),
+                updated_at = now()
+            RETURNING *
+            """,
+            device_id,
+            mode,
+        )
+    return serialize_device_row(row)
+
+
+async def fetch_desired_mode(
+    pool: asyncpg.Pool,
+    device_id: str,
+) -> tuple[str, int]:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT desired_mode, desired_mode_seq FROM devices WHERE device_id = $1",
+            device_id,
+        )
+    if row is None:
+        return "automated", 0
+    return row["desired_mode"], row["desired_mode_seq"]
+
+
+async def record_reported_mode(
+    pool: asyncpg.Pool,
+    *,
+    device_id: str,
+    mode: str,
+    seq: int,
+) -> None:
+    # Acks can arrive out of order after retries; a stale seq must not
+    # overwrite a newer report.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO devices (device_id, reported_mode, reported_mode_seq,
+                                 reported_mode_at, last_seen_at)
+            VALUES ($1, $2, $3, now(), now())
+            ON CONFLICT (device_id) DO UPDATE SET
+                reported_mode = $2,
+                reported_mode_seq = $3,
+                reported_mode_at = now(),
+                last_seen_at = now(),
+                updated_at = now()
+            WHERE coalesce(devices.reported_mode_seq, -1) <= $3
+            """,
+            device_id,
+            mode,
+            seq,
+        )

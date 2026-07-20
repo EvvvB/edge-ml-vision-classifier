@@ -117,18 +117,33 @@ async def send_capture_trigger(counter: int) -> bool:
 # ---------------------------------------------------------
 
 
-def parse_capture_event(data_lines: list[str]) -> int | None:
+def parse_capture_event(data_lines: list[str]) -> dict | None:
+    """Parse one SSE event's data into {counter, mode, mode_seq}.
+
+    counter is required; mode fields are optional so the parser keeps
+    working against a cloud API that predates modes.
+    """
     if not data_lines:
         return None
     try:
         payload = json.loads("\n".join(data_lines))
-        return int(payload["counter"])
+        event = {"counter": int(payload["counter"])}
     except (ValueError, TypeError, KeyError):
         return None
 
+    mode = payload.get("mode")
+    mode_seq = payload.get("mode_seq")
+    if mode in ("automated", "positioning") and mode_seq is not None:
+        try:
+            event["mode"] = mode
+            event["mode_seq"] = int(mode_seq)
+        except (ValueError, TypeError):
+            event.pop("mode", None)
+    return event
 
-async def iter_sse_counters(lines: AsyncIterator[str]) -> AsyncIterator[int]:
-    """Yield counter values from a raw SSE line stream.
+
+async def iter_sse_events(lines: AsyncIterator[str]) -> AsyncIterator[dict]:
+    """Yield parsed events from a raw SSE line stream.
 
     Heartbeat comments (leading ':') and unknown fields are ignored; an
     event's data lines are parsed when the blank separator line arrives.
@@ -136,10 +151,10 @@ async def iter_sse_counters(lines: AsyncIterator[str]) -> AsyncIterator[int]:
     data_lines: list[str] = []
     async for line in lines:
         if line == "":
-            counter = parse_capture_event(data_lines)
+            event = parse_capture_event(data_lines)
             data_lines = []
-            if counter is not None:
-                yield counter
+            if event is not None:
+                yield event
         elif line.startswith("data:"):
             data_lines.append(line[len("data:") :].strip())
 
@@ -151,7 +166,14 @@ async def capture_stream_worker() -> None:
     afterwards any increase is relayed to the Nicla. Reconnect snapshots
     replay the current counter, so presses made during a brief disconnect
     are still relayed once the stream returns.
+
+    Desired mode rides the same events. Unlike the counter, the snapshot is
+    NOT baselined away: desired state must converge on every (re)connect,
+    and the push layer's seq high-water makes re-applying it harmless.
     """
+    # Imported here because device_gateway imports this module for the
+    # address registry.
+    from app.services.device_gateway import apply_desired_mode
     stream_url = (
         settings.cloud_api_url.rstrip("/")
         + f"/devices/{settings.capture_device_id}/capture/stream"
@@ -177,7 +199,14 @@ async def capture_stream_worker() -> None:
                     response.raise_for_status()
                     logger.info("capture stream connected: %s", stream_url)
                     backoff_seconds = 1.0
-                    async for counter in iter_sse_counters(response.aiter_lines()):
+                    async for event in iter_sse_events(response.aiter_lines()):
+                        if "mode" in event:
+                            apply_desired_mode(
+                                settings.capture_device_id,
+                                event["mode"],
+                                event["mode_seq"],
+                            )
+                        counter = event["counter"]
                         if last_relayed is None:
                             last_relayed = counter
                             continue
