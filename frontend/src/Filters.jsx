@@ -50,6 +50,23 @@ export default function FilterSidebar({
     set({ labels })
   }
 
+  // Same orphan treatment as labels: keep selected model hashes visible even
+  // when the current facets no longer include them.
+  const facetModels = facets?.models ?? []
+  const knownModels = new Set(facetModels.map((entry) => entry.hash))
+  const orphanModels = filters.models.filter((hash) => !knownModels.has(hash))
+  const modelEntries = [
+    ...facetModels,
+    ...orphanModels.map((hash) => ({ source: '', hash, version: '', count: 0 })),
+  ]
+
+  const toggleModel = (hash) => {
+    const models = filters.models.includes(hash)
+      ? filters.models.filter((entry) => entry !== hash)
+      : [...filters.models, hash].sort()
+    set({ models })
+  }
+
   return (
     <aside className="filters">
       <Sparkline timeline={facets?.timeline} />
@@ -80,6 +97,33 @@ export default function FilterSidebar({
             { value: 'yolo', label: 'YOLO' },
           ]}
         />
+      </div>
+
+      <div className="filter-group">
+        <h3>Model version</h3>
+        {modelEntries.length === 0 && (
+          <p className="filter-empty">No stamped models yet</p>
+        )}
+        <div className="filter-options">
+          {modelEntries.map((entry) => (
+            <label
+              key={`${entry.source}-${entry.hash}`}
+              className="filter-option"
+              title={entry.hash}
+            >
+              <input
+                type="checkbox"
+                checked={filters.models.includes(entry.hash)}
+                onChange={() => toggleModel(entry.hash)}
+              />
+              <span>
+                {entry.source ? `${entry.source.toUpperCase()} · ` : ''}
+                {entry.version || entry.hash}
+              </span>
+              <span className="filter-count">{entry.count}</span>
+            </label>
+          ))}
+        </div>
       </div>
 
       <div className="filter-group">

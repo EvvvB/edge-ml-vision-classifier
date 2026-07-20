@@ -123,6 +123,13 @@ def build_cloud_metadata(saved_metadata: dict[str, Any]) -> dict[str, Any]:
         "yolo_detections": saved_metadata.get("yolo_detections") or [],
     }
 
+    # The Nicla stamps its own model identity (model_hash/model_manifest)
+    # inside device_metadata; these are the Pi model's counterparts. Absent
+    # on records whose inference failed, so those stay unstamped.
+    for key in ("yolo_model_hash", "yolo_model_manifest"):
+        if saved_metadata.get(key) is not None:
+            cloud_metadata[key] = saved_metadata[key]
+
     received_at = saved_metadata.get("received_at")
     if received_at and not cloud_metadata.get("captured_at"):
         # The Nicla has no clock, so the Pi's receive time is the closest

@@ -93,6 +93,7 @@ async def export_detections_route(
     request: Request,
     device_id: str | None = None,
     labels: str | None = None,
+    models: str | None = None,
     detections: str = "any",
     source: str = "any",
 ) -> Response:
@@ -101,6 +102,7 @@ async def export_detections_route(
         s3_client=request.app.state.s3_client,
         device_id=device_id,
         labels=labels,
+        models=models,
         detections=detections,
         source=source,
     )
@@ -147,6 +149,7 @@ async def read_detections(
     request: Request,
     device_id: str | None = None,
     labels: str | None = None,
+    models: str | None = None,
     detections: str = "any",
     source: str = "any",
     limit: int = 50,
@@ -156,6 +159,7 @@ async def read_detections(
         request.app.state.db,
         device_id=device_id,
         labels=labels,
+        models=models,
         detections=detections,
         source=source,
         limit=limit,

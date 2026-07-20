@@ -1,0 +1,6 @@
+{
+  "model_version": "yolo26m-stock",
+  "base_model": "yolo26m",
+  "trained_at": null,
+  "notes": "Stock Ultralytics YOLO26m weights, zero fine-tuning."
+}

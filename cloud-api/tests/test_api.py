@@ -173,11 +173,16 @@ async def test_detections_reject_invalid_filter_values(monkeypatch) -> None:
             bad_facet_source = await client.get(
                 "/detections/facets", params={"source": "ssd"}
             )
+            bad_models = await client.get(
+                "/detections", params={"models": "not-a-hash"}
+            )
 
     assert bad_detections.status_code == 400
     assert "detections must be one of" in bad_detections.json()["detail"]
     assert bad_source.status_code == 400
     assert bad_facet_source.status_code == 400
+    assert bad_models.status_code == 400
+    assert "hex model hashes" in bad_models.json()["detail"]
 
 
 def test_parse_label_filters_normalizes() -> None:

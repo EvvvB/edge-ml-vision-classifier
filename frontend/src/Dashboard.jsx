@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   apiFetch,
@@ -18,6 +18,7 @@ function filterParams(filters) {
   return {
     device_id: filters.deviceId || undefined,
     labels: filters.labels.length > 0 ? filters.labels.join(',') : undefined,
+    models: filters.models.length > 0 ? filters.models.join(',') : undefined,
     detections: filters.detections !== 'any' ? filters.detections : undefined,
     source: filters.source !== 'any' ? filters.source : undefined,
   }
@@ -321,6 +322,22 @@ const OVERLAY_SOURCES = [
   { key: 'yolo', metadataKey: 'yolo_detections', label: 'YOLO', color: '#6fd08c' },
 ]
 
+// Model identity fields per source: the Nicla's FOMO fields predate the
+// two-model schema, so they are unprefixed in metadata.
+const MODEL_STAMP_FIELDS = [
+  { label: 'FOMO', hashKey: 'model_hash', manifestKey: 'model_manifest' },
+  { label: 'YOLO', hashKey: 'yolo_model_hash', manifestKey: 'yolo_model_manifest' },
+]
+
+function modelStamps(metadata) {
+  return MODEL_STAMP_FIELDS.flatMap((field) => {
+    const hash = metadata?.[field.hashKey]
+    if (!hash) return []
+    const version = metadata?.[field.manifestKey]?.model_version
+    return [{ label: field.label, hash, version }]
+  })
+}
+
 function overlayBoxes(metadata) {
   const boxes = {}
   for (const source of OVERLAY_SOURCES) {
@@ -460,6 +477,15 @@ function DetectionModal({ detection, onClose }) {
           <dd>{(detection.file_size_bytes / 1024).toFixed(1)} KB</dd>
           <dt>Image ID</dt>
           <dd className="mono">{detection.image_id}</dd>
+          {modelStamps(metadata).map((stamp) => (
+            <Fragment key={stamp.label}>
+              <dt>{stamp.label} model</dt>
+              <dd>
+                {stamp.version ? `${stamp.version} ` : ''}
+                <span className="mono">{stamp.hash}</span>
+              </dd>
+            </Fragment>
+          ))}
         </dl>
         <details>
           <summary>Metadata</summary>

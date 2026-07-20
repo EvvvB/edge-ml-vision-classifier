@@ -2,7 +2,11 @@ uploads/
 metadata/
 __pycache__/
 .venv/
-app/inference/models/
+# Weights are too large to commit, but manifests are the deployment record.
+# `models/*` (not `models/`) so the negations below can re-include files.
+app/inference/models/*
+!app/inference/models/README.md
+!app/inference/models/*.manifest.json
 app/inference/runs/
 app/inference/.ultralytics/
 app/inference/.matplotlib/

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -169,6 +170,11 @@ async def get_detection_image(
 VALID_DETECTION_FILTERS = frozenset({"any", "some", "none"})
 VALID_SOURCE_FILTERS = frozenset({"any", "fomo", "yolo"})
 MAX_LABEL_FILTERS = 25
+MAX_MODEL_FILTERS = 25
+
+# Devices stamp truncated SHA-256 hex (12 chars today); accept any plausible
+# hex length so the filter survives a future change to the truncation.
+MODEL_HASH_PATTERN = re.compile(r"^[0-9a-f]{4,64}$")
 
 
 def parse_label_filters(labels: str | None) -> list[str]:
@@ -180,6 +186,24 @@ def parse_label_filters(labels: str | None) -> list[str]:
             status_code=400,
             detail=f"at most {MAX_LABEL_FILTERS} labels may be filtered at once",
         )
+    return parsed
+
+
+def parse_model_filters(models: str | None) -> list[str]:
+    if not models:
+        return []
+    parsed = sorted({model.strip().lower() for model in models.split(",") if model.strip()})
+    if len(parsed) > MAX_MODEL_FILTERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"at most {MAX_MODEL_FILTERS} models may be filtered at once",
+        )
+    for model_hash in parsed:
+        if not MODEL_HASH_PATTERN.fullmatch(model_hash):
+            raise HTTPException(
+                status_code=400,
+                detail="models must be hex model hashes",
+            )
     return parsed
 
 
@@ -196,6 +220,7 @@ async def list_detections(
     db: asyncpg.Pool,
     device_id: str | None,
     labels: str | None,
+    models: str | None,
     detections: str,
     source: str,
     limit: int,
@@ -215,6 +240,7 @@ async def list_detections(
         db,
         device_id=device_id,
         labels=parse_label_filters(labels),
+        models=parse_model_filters(models),
         detections=detections,
         source=source,
         limit=limit,
@@ -302,6 +328,7 @@ async def export_detections(
     s3_client: Any,
     device_id: str | None,
     labels: str | None,
+    models: str | None,
     detections: str,
     source: str,
 ) -> Response:
@@ -312,6 +339,7 @@ async def export_detections(
         db,
         device_id=device_id,
         labels=parse_label_filters(labels),
+        models=parse_model_filters(models),
         detections=detections,
         source=source,
         limit=EXPORT_MAX_IMAGES + 1,
@@ -366,6 +394,7 @@ async def export_detections(
                     "query": {
                         "device_id": device_id,
                         "labels": parse_label_filters(labels),
+                        "models": parse_model_filters(models),
                         "detections": detections,
                         "source": source,
                     },

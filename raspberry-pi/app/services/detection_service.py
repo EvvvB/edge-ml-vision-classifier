@@ -12,7 +12,7 @@ from fastapi import BackgroundTasks, HTTPException, UploadFile
 from PIL import Image
 
 from app.config import settings
-from app.inference.model import predict_image
+from app.inference.model import model_identity, predict_image
 from app.services.capture_relay import remember_device_address
 from app.services.cloud_forwarder import forward_detection
 from app.services.coco import normalize_fomo_detections, normalize_yolo_detections
@@ -247,11 +247,14 @@ def run_inference_job(image_path: Path, metadata_path: Path) -> None:
         forward_detection(image_path, metadata_path)
         raise
 
+    identity = model_identity()
     update_metadata(
         metadata_path,
         {
             "inference_status": "complete",
             "yolo_detections": normalize_yolo_detections(detections),
+            "yolo_model_hash": identity["hash"],
+            "yolo_model_manifest": identity["manifest"],
         },
     )
     forward_detection(image_path, metadata_path)

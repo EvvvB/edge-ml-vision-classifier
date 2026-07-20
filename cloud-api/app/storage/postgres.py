@@ -201,6 +201,17 @@ async def fetch_capture_counter(pool: asyncpg.Pool, device_id: str) -> int:
 
 DETECTION_SOURCES = ("fomo", "yolo")
 
+# Where each source's model identity lives in upload metadata. The Nicla
+# predates the two-model schema, so its FOMO fields are unprefixed.
+MODEL_HASH_FIELDS = {
+    "fomo": "metadata->>'model_hash'",
+    "yolo": "metadata->>'yolo_model_hash'",
+}
+MODEL_VERSION_FIELDS = {
+    "fomo": "metadata->'model_manifest'->>'model_version'",
+    "yolo": "metadata->'yolo_model_manifest'->>'model_version'",
+}
+
 
 def detection_array(source: str) -> str:
     return f"coalesce(metadata->'{source}_detections', '[]'::jsonb)"
@@ -210,6 +221,7 @@ def build_detection_filters(
     *,
     device_id: str | None,
     labels: list[str],
+    models: list[str],
     detections: str,
     source: str,
     params: list[Any],
@@ -252,6 +264,18 @@ def build_detection_filters(
             + ")"
         )
 
+    if models:
+        params.append(models)
+        position = len(params)
+        clauses.append(
+            "("
+            + " OR ".join(
+                f"{MODEL_HASH_FIELDS[s]} = ANY(${position}::text[])"
+                for s in sources
+            )
+            + ")"
+        )
+
     if not clauses:
         return ""
     return " WHERE " + " AND ".join(clauses)
@@ -262,6 +286,7 @@ async def fetch_detections(
     *,
     device_id: str | None,
     labels: list[str],
+    models: list[str],
     detections: str,
     source: str,
     limit: int,
@@ -271,6 +296,7 @@ async def fetch_detections(
     where = build_detection_filters(
         device_id=device_id,
         labels=labels,
+        models=models,
         detections=detections,
         source=source,
         params=params,
@@ -320,6 +346,15 @@ async def fetch_detection_facets(
     none_clause = " AND ".join(
         f"jsonb_array_length({detection_array(s)}) = 0" for s in sources
     )
+    # One row per (source, model hash). UNION ALL because each arm carries a
+    # distinct source constant. max(model_version) picks a display label if
+    # manifests ever disagreed for the same hash; the hash stays the truth.
+    model_arms = " UNION ALL ".join(
+        f"SELECT '{s}' AS source, {MODEL_HASH_FIELDS[s]} AS model_hash,"
+        f" {MODEL_VERSION_FIELDS[s]} AS model_version"
+        f" FROM detections{device_where}"
+        for s in sources
+    )
 
     async with pool.acquire() as conn:
         label_rows = await conn.fetch(
@@ -339,6 +374,17 @@ async def fetch_detection_facets(
         none_where = device_where + (" AND " if device_where else " WHERE ")
         none_count = await conn.fetchval(
             f"SELECT count(*) FROM detections{none_where}{none_clause}",
+            *device_params,
+        )
+        model_rows = await conn.fetch(
+            f"""
+            SELECT source, model_hash, max(model_version) AS model_version,
+                   count(*) AS record_count
+            FROM ({model_arms}) AS stamped
+            WHERE model_hash IS NOT NULL AND model_hash <> ''
+            GROUP BY source, model_hash
+            ORDER BY source, record_count DESC, model_hash
+            """,
             *device_params,
         )
         device_rows = await conn.fetch(
@@ -381,6 +427,15 @@ async def fetch_detection_facets(
         "labels": [
             {"label": row["label"], "count": row["record_count"]}
             for row in label_rows
+        ],
+        "models": [
+            {
+                "source": row["source"],
+                "hash": row["model_hash"],
+                "version": row["model_version"],
+                "count": row["record_count"],
+            }
+            for row in model_rows
         ],
         "devices": [
             {"device_id": row["device_id"], "count": row["record_count"]}
