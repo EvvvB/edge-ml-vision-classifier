@@ -14,6 +14,7 @@ from botocore.exceptions import ClientError
 from fastapi import HTTPException, Response, UploadFile
 
 from app.config import settings
+from app.services.eval_service import record_image_eval
 from app.storage.postgres import (
     fetch_detection,
     fetch_detection_facets,
@@ -107,6 +108,19 @@ async def receive_detection_upload(
             )
         except Exception:
             pass
+
+    # Score FOMO against the Pi YOLO detections that arrived in the same
+    # payload. Pure bookkeeping over data already stored — never fails the
+    # upload; the backfill catches anything missed here.
+    try:
+        await record_image_eval(
+            db,
+            image_id=image_id,
+            metadata=parsed_metadata,
+            captured_at=captured_at,
+        )
+    except Exception:
+        pass
 
     return {
         "ok": True,

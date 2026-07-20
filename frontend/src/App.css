@@ -250,6 +250,18 @@
   border: 1px solid var(--border);
 }
 
+/* The Devices tab lives outside the primary tab group, next to Lock, as a
+   maintenance surface rather than a main view. */
+.view-tab.secondary {
+  border: 1px solid transparent;
+}
+
+.view-tab.secondary.active {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border);
+}
+
 /* --- Device manager --- */
 
 .device-manager-hint {
@@ -331,6 +343,114 @@ button.ghost:disabled {
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 14px;
   margin-bottom: 24px;
+}
+
+/* --- Device presence strip (detections view) --- */
+
+.device-status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.device-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.device-status-chip:hover {
+  border-color: var(--text-dim);
+}
+
+.device-status-name {
+  font-weight: 600;
+}
+
+.device-status-age {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* --- Eval view (model agreement + disagreement review) --- */
+
+.eval-view {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.eval-panel {
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.eval-section-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.eval-section-header h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.eval-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.eval-panel-header h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.eval-panel-header button {
+  margin-left: auto;
+}
+
+.eval-panel-note {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 0;
+}
+
+.eval-pair {
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  flex-wrap: wrap;
+  font-size: 14px;
+}
+
+.eval-model {
+  color: var(--chip-color);
+  font-weight: 600;
+}
+
+.eval-metric strong {
+  font-size: 15px;
+}
+
+.eval-counts {
+  color: var(--text-dim);
+  font-size: 13px;
 }
 
 .device-card {

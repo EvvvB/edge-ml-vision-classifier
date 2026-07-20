@@ -70,6 +70,37 @@ async def init_db(pool: asyncpg.Pool) -> None:
             )
             """
         )
+        # One row per (image, student, teacher) pair: how well the student
+        # model's detections agreed with the teacher's on that image. Rows
+        # are pure derivations of detections.metadata — safe to truncate and
+        # rebuild via the eval backfill whenever scoring rules change.
+        # Skipped rows (teacher inference never ran) are recorded too, so
+        # "unscored" always means "backfill has not visited this image yet".
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS eval_results (
+                image_id UUID NOT NULL
+                    REFERENCES detections (image_id) ON DELETE CASCADE,
+                student_source TEXT NOT NULL,
+                teacher_source TEXT NOT NULL,
+                student_hash TEXT,
+                student_version TEXT,
+                teacher_hash TEXT,
+                teacher_version TEXT,
+                status TEXT NOT NULL,
+                skip_reason TEXT,
+                student_total INT NOT NULL,
+                teacher_total INT NOT NULL,
+                matched_count INT NOT NULL,
+                student_matched INT NOT NULL,
+                detail JSONB NOT NULL,
+                captured_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (image_id, student_source, teacher_source)
+            )
+            """
+        )
         # Device registry, upserted from hellos and uploads. desired_mode is
         # the cloud's command (versioned by desired_mode_seq, the same
         # high-water-mark pattern as capture counters); reported_mode is what
@@ -477,6 +508,220 @@ def serialize_row(row: asyncpg.Record) -> dict[str, Any]:
     if isinstance(data.get("metadata"), str):
         data["metadata"] = json.loads(data["metadata"])
     for key in ("image_id", "captured_at", "created_at", "updated_at"):
+        if data.get(key) is not None:
+            data[key] = str(data[key])
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Eval results (student model scored against teacher model)
+# ---------------------------------------------------------------------------
+
+
+async def upsert_eval_result(
+    pool: asyncpg.Pool,
+    *,
+    image_id: UUID,
+    student_source: str,
+    teacher_source: str,
+    student_hash: str | None,
+    student_version: str | None,
+    teacher_hash: str | None,
+    teacher_version: str | None,
+    status: str,
+    skip_reason: str | None,
+    student_total: int,
+    teacher_total: int,
+    matched_count: int,
+    student_matched: int,
+    detail: dict[str, Any],
+    captured_at: datetime | None,
+) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO eval_results (
+                image_id, student_source, teacher_source,
+                student_hash, student_version, teacher_hash, teacher_version,
+                status, skip_reason,
+                student_total, teacher_total, matched_count, student_matched,
+                detail, captured_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                    $14::jsonb, $15)
+            ON CONFLICT (image_id, student_source, teacher_source)
+            DO UPDATE SET
+                student_hash = $4,
+                student_version = $5,
+                teacher_hash = $6,
+                teacher_version = $7,
+                status = $8,
+                skip_reason = $9,
+                student_total = $10,
+                teacher_total = $11,
+                matched_count = $12,
+                student_matched = $13,
+                detail = $14::jsonb,
+                captured_at = $15,
+                updated_at = now()
+            """,
+            image_id,
+            student_source,
+            teacher_source,
+            student_hash,
+            student_version,
+            teacher_hash,
+            teacher_version,
+            status,
+            skip_reason,
+            student_total,
+            teacher_total,
+            matched_count,
+            student_matched,
+            json.dumps(detail),
+            captured_at,
+        )
+
+
+async def fetch_unscored_detections(
+    pool: asyncpg.Pool,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Detections the eval backfill has not visited yet, oldest first.
+
+    Skipped rows count as visited, so this shrinks monotonically as the
+    backfill writes rows — the caller needs no offset to make progress.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT d.image_id, d.metadata, d.captured_at
+            FROM detections d
+            LEFT JOIN eval_results e ON e.image_id = d.image_id
+            WHERE e.image_id IS NULL
+            ORDER BY d.created_at, d.image_id
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [eval_input_row(row) for row in rows]
+
+
+async def fetch_detections_for_rescore(
+    pool: asyncpg.Pool,
+    *,
+    limit: int,
+    offset: int,
+) -> list[dict[str, Any]]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT image_id, metadata, captured_at
+            FROM detections
+            ORDER BY created_at, image_id
+            LIMIT $1 OFFSET $2
+            """,
+            limit,
+            offset,
+        )
+    return [eval_input_row(row) for row in rows]
+
+
+def eval_input_row(row: asyncpg.Record) -> dict[str, Any]:
+    """Keep image_id/captured_at native so they round-trip into upserts."""
+    metadata = row["metadata"]
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    return {
+        "image_id": row["image_id"],
+        "metadata": metadata if isinstance(metadata, dict) else {},
+        "captured_at": row["captured_at"],
+    }
+
+
+async def fetch_eval_summary(pool: asyncpg.Pool) -> dict[str, Any]:
+    async with pool.acquire() as conn:
+        pair_rows = await conn.fetch(
+            """
+            SELECT student_source, teacher_source,
+                   student_hash, max(student_version) AS student_version,
+                   teacher_hash, max(teacher_version) AS teacher_version,
+                   count(*) AS images,
+                   count(*) FILTER (
+                       WHERE student_total = 0 AND teacher_total = 0
+                   ) AS empty_images,
+                   count(*) FILTER (
+                       WHERE student_total > student_matched
+                          OR teacher_total > matched_count
+                   ) AS disagreement_images,
+                   sum(student_total) AS student_total,
+                   sum(teacher_total) AS teacher_total,
+                   sum(matched_count) AS matched_count,
+                   sum(student_matched) AS student_matched
+            FROM eval_results
+            WHERE status = 'scored'
+            GROUP BY student_source, teacher_source, student_hash, teacher_hash
+            ORDER BY images DESC, student_hash
+            """
+        )
+        status_rows = await conn.fetch(
+            """
+            SELECT status, count(*) AS record_count
+            FROM eval_results
+            GROUP BY status
+            """
+        )
+        unscored = await conn.fetchval(
+            """
+            SELECT count(*)
+            FROM detections d
+            LEFT JOIN eval_results e ON e.image_id = d.image_id
+            WHERE e.image_id IS NULL
+            """
+        )
+
+    counts = {row["status"]: row["record_count"] for row in status_rows}
+    return {
+        "scored_images": counts.get("scored", 0),
+        "skipped_images": counts.get("skipped", 0),
+        "unscored_images": unscored,
+        "pairs": [dict(row) for row in pair_rows],
+    }
+
+
+async def fetch_eval_disagreements(
+    pool: asyncpg.Pool,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT e.image_id, d.device_id,
+                   e.student_hash, e.student_version,
+                   e.teacher_hash, e.teacher_version,
+                   e.student_total, e.teacher_total,
+                   e.matched_count, e.student_matched,
+                   e.detail, e.captured_at, e.created_at
+            FROM eval_results e
+            JOIN detections d ON d.image_id = e.image_id
+            WHERE e.status = 'scored'
+              AND (e.student_total > e.student_matched
+                   OR e.teacher_total > e.matched_count)
+            ORDER BY coalesce(e.captured_at, e.created_at) DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [serialize_eval_row(row) for row in rows]
+
+
+def serialize_eval_row(row: asyncpg.Record) -> dict[str, Any]:
+    data = dict(row)
+    if isinstance(data.get("detail"), str):
+        data["detail"] = json.loads(data["detail"])
+    for key in ("image_id", "captured_at", "created_at"):
         if data.get(key) is not None:
             data[key] = str(data[key])
     return data

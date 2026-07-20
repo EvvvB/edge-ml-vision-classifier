@@ -49,6 +49,20 @@ class Settings:
         if origin.strip()
     )
 
+    # Eval: FOMO (student) is scored against Pi YOLO (teacher) on the labels
+    # the student model was trained on. Teacher detections below the minimum
+    # confidence are excluded entirely rather than counted as misses — a
+    # low-confidence teacher box is not trustworthy enough to penalize the
+    # student for disagreeing with it.
+    eval_labels: frozenset[str] = frozenset(
+        label.strip().lower()
+        for label in os.getenv("EVAL_LABELS", "dog").split(",")
+        if label.strip()
+    )
+    eval_teacher_min_confidence: float = float(
+        os.getenv("EVAL_TEACHER_MIN_CONFIDENCE", "0.5")
+    )
+
     # Device platform: positioning auto-expires so a forgotten pause cannot
     # silence a camera indefinitely; preview frames live only in memory and
     # vanish shortly after the camera stops sending them.

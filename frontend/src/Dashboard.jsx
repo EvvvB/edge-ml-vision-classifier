@@ -2,7 +2,8 @@ import { Fragment, useEffect, useMemo, useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { apiFetch, detectionImageUrl, exportDownloadUrl } from './api.js'
 import DeviceManager from './DeviceManager.jsx'
-import DevicesPanel, { isPositioning } from './DevicesPanel.jsx'
+import DevicesPanel, { isPositioning, presenceOf } from './DevicesPanel.jsx'
+import EvalView from './EvalPanel.jsx'
 import FilterSidebar from './Filters.jsx'
 import TileSimulator from './TileSimulator.jsx'
 import { filtersFromUrl, syncFiltersToUrl } from './filterState.js'
@@ -117,6 +118,24 @@ export default function Dashboard({ onAuthError, onLock }) {
     }))
   }
 
+  // Filtering by model from the devices tab lands you on the grid that
+  // filter applies to.
+  const filterByModelFromDevices = (hash) => {
+    toggleModelFilter(hash)
+    setView('detections')
+  }
+
+  // The eval view knows only image ids; fetch the full record so the
+  // shared detection modal can draw both models' overlays.
+  const openImage = async (imageId) => {
+    try {
+      const { detection } = await apiFetch(`/detections/${imageId}`)
+      setSelected(detection)
+    } catch {
+      // Modal simply doesn't open if the record vanished.
+    }
+  }
+
   return (
     <div className="dashboard">
       <header className="dashboard-header">
@@ -127,7 +146,7 @@ export default function Dashboard({ onAuthError, onLock }) {
         <nav className="view-tabs" aria-label="Dashboard view">
           {[
             ['detections', 'Detections'],
-            ['devices', 'Devices'],
+            ['eval', 'Eval'],
           ].map(([value, label]) => (
             <button
               key={value}
@@ -140,6 +159,15 @@ export default function Dashboard({ onAuthError, onLock }) {
           ))}
         </nav>
         <div className="header-actions">
+          {/* Devices is a maintenance surface, so it sits apart from the
+              primary tabs. */}
+          <button
+            type="button"
+            className={`view-tab secondary${view === 'devices' ? ' active' : ''}`}
+            onClick={() => setView('devices')}
+          >
+            Devices
+          </button>
           <button type="button" className="ghost" onClick={onLock}>
             Lock
           </button>
@@ -155,17 +183,46 @@ export default function Dashboard({ onAuthError, onLock }) {
       )}
 
       {view === 'devices' && (
-        <DeviceManager
-          devices={devices}
-          isPending={devicesQuery.isPending}
-        />
+        <>
+          <DevicesPanel
+            devices={devices}
+            onModelFilter={filterByModelFromDevices}
+          />
+          <DeviceManager
+            devices={devices}
+            isPending={devicesQuery.isPending}
+          />
+        </>
       )}
+
+      {view === 'eval' && <EvalView onSelectImage={openImage} />}
 
       <div
         className="dashboard-view"
         style={view === 'detections' ? undefined : { display: 'none' }}
       >
-      <DevicesPanel devices={devices} onModelFilter={toggleModelFilter} />
+      {/* Presence at a glance without the full device cards; the Devices
+          tab has the previews and controls. */}
+      {devices.length > 0 && (
+        <div className="device-status-strip">
+          {devices.map((device) => {
+            const presence = presenceOf(device)
+            return (
+              <button
+                key={device.device_id}
+                type="button"
+                className="device-status-chip"
+                onClick={() => setView('devices')}
+                title="Open the Devices tab"
+              >
+                <span className={`presence-dot ${presence.dot}`} />
+                <span className="device-status-name">{device.device_id}</span>
+                <span className="device-status-age">{presence.label}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
 
       <div className="dashboard-body">
         <FilterSidebar
