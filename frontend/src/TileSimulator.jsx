@@ -47,6 +47,23 @@ function toGrayscale(imageData) {
   return imageData
 }
 
+// The ROI rectangles inference actually ran on, straight from firmware
+// metadata: 96x96 motion crops in motion_crops mode, the tile grid in
+// full_sweep mode. Empty for uploads that predate the field.
+export function inferenceRois(metadata) {
+  const entries = metadata?.inference_rois
+  if (!Array.isArray(entries)) return []
+  return entries
+    .filter(
+      (roi) =>
+        Array.isArray(roi) &&
+        roi.length === 4 &&
+        roi.every((value) => Number.isFinite(value)),
+    )
+    .map(([x, y, width, height]) => ({ x, y, width, height }))
+    .filter((roi) => roi.width > 0 && roi.height > 0)
+}
+
 function loadImage(src) {
   return new Promise((resolve, reject) => {
     const img = new Image()
@@ -56,21 +73,13 @@ function loadImage(src) {
   })
 }
 
-async function generateTiles(imageId, frameWidth, frameHeight, columns, rows) {
+async function generateTiles(imageId, frameWidth, frameHeight, rois) {
   const img = await loadImage(detectionImageUrl(imageId))
 
   // The stored image should match the frame the ROIs were computed on, but
   // scale defensively in case the server ever resizes it.
   const scaleX = img.naturalWidth / frameWidth
   const scaleY = img.naturalHeight / frameHeight
-
-  const rois = createTileRois(
-    frameWidth,
-    frameHeight,
-    columns,
-    rows,
-    TILE_OVERLAP_PIXELS,
-  )
 
   return rois.map((roi, index) => {
     const canvas = document.createElement('canvas')
@@ -193,10 +202,10 @@ function TileBoxOverlay({ boxes, tileIndex }) {
   )
 }
 
-function downloadTile(tile, imageId) {
+function downloadTile(tile, imageId, unit) {
   const link = document.createElement('a')
   link.href = tile.url
-  link.download = `${imageId}-tile-${tile.index}.png`
+  link.download = `${imageId}-${unit}-${tile.index}.png`
   link.click()
 }
 
@@ -209,15 +218,36 @@ export default function TileSimulator({ imageId, metadata }) {
   const frameHeight = Number(metadata.frame_height)
   if (!(frameWidth > 0 && frameHeight > 0)) return null
 
+  // In idle mode no inference ran, so there is nothing to replicate.
+  if (metadata.inference_mode === 'idle') return null
+
+  const isMotionCrops = metadata.inference_mode === 'motion_crops'
   const columns = Number(metadata.grid_columns) || DEFAULT_GRID_COLUMNS
   const rows = Number(metadata.grid_rows) || DEFAULT_GRID_ROWS
+
+  // Prefer the ROIs the firmware says it ran on; recompute the sweep grid
+  // only for uploads that predate the inference_rois field. Motion crops
+  // cannot be reconstructed, so without recorded ROIs there is no button.
+  const recordedRois = inferenceRois(metadata)
+  const rois =
+    recordedRois.length > 0
+      ? recordedRois
+      : isMotionCrops
+        ? []
+        : createTileRois(frameWidth, frameHeight, columns, rows, TILE_OVERLAP_PIXELS)
+  if (rois.length === 0) return null
+
+  const unit = isMotionCrops ? 'crop' : 'tile'
+  // Three columns keeps crop tiles the same on-screen size as sweep tiles
+  // (and matches the firmware's MOTION_MAX_CROPS); extra crops just wrap.
+  const gridColumns = isMotionCrops ? 3 : columns
   const frameBoxes = collectBoxes(metadata)
 
   async function handleGenerate() {
     setBusy(true)
     setError(null)
     try {
-      setTiles(await generateTiles(imageId, frameWidth, frameHeight, columns, rows))
+      setTiles(await generateTiles(imageId, frameWidth, frameHeight, rois))
     } catch (err) {
       setError(err.message)
     } finally {
@@ -225,21 +255,24 @@ export default function TileSimulator({ imageId, metadata }) {
     }
   }
 
+  const generateLabel = isMotionCrops
+    ? `Show motion crops (${rois.length}, ${MODEL_INPUT_SIZE}×${MODEL_INPUT_SIZE} grayscale)`
+    : `Simulate Nicla tiles (${rows}×${columns}, ${MODEL_INPUT_SIZE}×${MODEL_INPUT_SIZE} grayscale)`
+  const regenerateLabel = isMotionCrops
+    ? 'Regenerate motion crops'
+    : 'Regenerate Nicla tiles'
+
   return (
     <section className="tile-simulator">
       <div className="tile-simulator-header">
         <button type="button" className="ghost" onClick={handleGenerate} disabled={busy}>
-          {busy
-            ? 'Generating…'
-            : tiles
-              ? 'Regenerate Nicla tiles'
-              : `Simulate Nicla tiles (${rows}×${columns}, ${MODEL_INPUT_SIZE}×${MODEL_INPUT_SIZE} grayscale)`}
+          {busy ? 'Generating…' : tiles ? regenerateLabel : generateLabel}
         </button>
         {tiles && (
           <button
             type="button"
             className="ghost"
-            onClick={() => tiles.forEach((tile) => downloadTile(tile, imageId))}
+            onClick={() => tiles.forEach((tile) => downloadTile(tile, imageId, unit))}
           >
             Download all
           </button>
@@ -249,16 +282,16 @@ export default function TileSimulator({ imageId, metadata }) {
       {tiles && (
         <div
           className="tile-grid"
-          style={{ gridTemplateColumns: `repeat(${columns}, 1fr)` }}
+          style={{ gridTemplateColumns: `repeat(${gridColumns}, 1fr)` }}
         >
           {tiles.map((tile) => (
             <figure key={tile.index} className="tile">
               <div className="tile-image-wrap">
                 <img
                   src={tile.url}
-                  alt={`Tile ${tile.index}`}
+                  alt={`${unit} ${tile.index}`}
                   title="Click to download"
-                  onClick={() => downloadTile(tile, imageId)}
+                  onClick={() => downloadTile(tile, imageId, unit)}
                 />
                 <TileBoxOverlay
                   boxes={boxesForTile(frameBoxes, tile)}
@@ -266,7 +299,7 @@ export default function TileSimulator({ imageId, metadata }) {
                 />
               </div>
               <figcaption>
-                tile {tile.index} · {tile.width}×{tile.height} @ ({tile.x},
+                {unit} {tile.index} · {tile.width}×{tile.height} @ ({tile.x},
                 {tile.y}) → {MODEL_INPUT_SIZE}×{MODEL_INPUT_SIZE}
               </figcaption>
             </figure>

@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "device_id": "nicla-test",
+  "transport": "wifi_http",
+  "trigger": "detection",
+  "image_encoding": "rgb565",
+  "image_content_type": "application/octet-stream",
+  "image_byte_count": 307200,
+  "frame_width": 480,
+  "frame_height": 320,
+  "inference_mode": "motion_crops",
+  "inference_rois": [
+    [
+      57,
+      183,
+      96,
+      96
+    ],
+    [
+      332,
+      69,
+      96,
+      96
+    ]
+  ],
+  "minimum_confidence": 0.35,
+  "model_hash": "c8e667301730",
+  "model_manifest": {
+    "model_version": "seed-fixture",
+    "notes": "synthetic motion-crop test frame"
+  },
+  "nicla_uptime_ms": 114642,
+  "detection_count": 2,
+  "pi_image_id": "05d18b95aae81a12984bb4363c10c1f0",
+  "inference_status": "complete",
+  "fomo_detections": [
+    {
+      "source": "fomo",
+      "label": "dog",
+      "confidence": 0.88,
+      "bbox": [
+        83,
+        211,
+        44,
+        40
+      ],
+      "tile": 0,
+      "center": [
+        105,
+        231
+      ]
+    },
+    {
+      "source": "fomo",
+      "label": "dog",
+      "confidence": 0.48,
+      "bbox": [
+        358,
+        97,
+        44,
+        40
+      ],
+      "tile": 1,
+      "center": [
+        380,
+        117
+      ]
+    }
+  ],
+  "yolo_detections": [
+    {
+      "source": "yolo",
+      "label": "dog",
+      "confidence": 0.94,
+      "bbox": [
+        55,
+        165,
+        100,
+        133
+      ]
+    },
+    {
+      "source": "yolo",
+      "label": "dog",
+      "confidence": 0.77,
+      "bbox": [
+        330,
+        80,
+        100,
+        74
+      ]
+    }
+  ],
+  "yolo_model_hash": "75675e20eb46",
+  "yolo_model_manifest": {
+    "model_version": "seed-fixture"
+  }
+}

@@ -5,7 +5,7 @@ import DeviceManager from './DeviceManager.jsx'
 import DevicesPanel, { isPositioning, presenceOf } from './DevicesPanel.jsx'
 import EvalView from './EvalPanel.jsx'
 import FilterSidebar from './Filters.jsx'
-import TileSimulator from './TileSimulator.jsx'
+import TileSimulator, { inferenceRois } from './TileSimulator.jsx'
 import { filtersFromUrl, syncFiltersToUrl } from './filterState.js'
 import { isLocalEnvironment } from './env.js'
 
@@ -278,6 +278,7 @@ export default function Dashboard({ onAuthError, onLock }) {
 
       {selected && (
         <DetectionModal
+          key={selected.image_id}
           detection={selected}
           onClose={() => setSelected(null)}
         />
@@ -379,6 +380,10 @@ const OVERLAY_SOURCES = [
   { key: 'yolo', metadataKey: 'yolo_detections', label: 'YOLO', color: '#6fd08c' },
 ]
 
+// Outline color for the ROI rectangles inference ran on (metadata
+// inference_rois) — distinct from both detection sources.
+const ROI_COLOR = '#b48ef2'
+
 // Model identity fields per source: the Nicla's FOMO fields predate the
 // two-model schema, so they are unprefixed in metadata.
 const MODEL_STAMP_FIELDS = [
@@ -444,8 +449,51 @@ function BoxMarker({ det, color, frameWidth, showLabel = true }) {
   )
 }
 
+// Dashed outline of one inference ROI, labeled with the same index the tile
+// simulator and the per-detection `tile` field use.
+function RoiMarker({ roi, index, frameWidth, unit }) {
+  const fontSize = Math.max(9, frameWidth * 0.03)
+  return (
+    <g>
+      <rect
+        x={roi.x}
+        y={roi.y}
+        width={roi.width}
+        height={roi.height}
+        fill="none"
+        stroke={ROI_COLOR}
+        strokeWidth="1.5"
+        strokeDasharray="6 4"
+        vectorEffect="non-scaling-stroke"
+      />
+      <text
+        x={roi.x + 3}
+        y={roi.y + fontSize}
+        fill={ROI_COLOR}
+        fontSize={fontSize}
+        fontFamily="ui-monospace, monospace"
+        paintOrder="stroke"
+        stroke="rgba(0,0,0,0.75)"
+        strokeWidth={fontSize * 0.18}
+      >
+        {unit} {index}
+      </text>
+    </g>
+  )
+}
+
 function DetectionModal({ detection, onClose }) {
-  const [visible, setVisible] = useState({ fomo: true, yolo: true })
+  const metadata = detection.metadata ?? {}
+  const isMotionCrops = metadata.inference_mode === 'motion_crops'
+
+  // ROI outlines start visible for motion-crop uploads, where "what did the
+  // model actually see" is the interesting question; for full sweeps the 2x3
+  // grid is mostly noise, so it starts hidden but stays toggleable.
+  const [visible, setVisible] = useState({
+    fomo: true,
+    yolo: true,
+    rois: isMotionCrops,
+  })
 
   useEffect(() => {
     function handleKey(event) {
@@ -455,13 +503,13 @@ function DetectionModal({ detection, onClose }) {
     return () => window.removeEventListener('keydown', handleKey)
   }, [onClose])
 
-  const metadata = detection.metadata ?? {}
   const boxes = overlayBoxes(metadata)
   const frameWidth = Number(metadata.frame_width)
   const frameHeight = Number(metadata.frame_height)
   const stored = detection.upload_status === 'stored'
   const canOverlay = stored && frameWidth > 0 && frameHeight > 0
   const hasAnyBoxes = OVERLAY_SOURCES.some((s) => boxes[s.key].length > 0)
+  const rois = canOverlay ? inferenceRois(metadata) : []
 
   return (
     <div
@@ -477,7 +525,7 @@ function DetectionModal({ detection, onClose }) {
             Close
           </button>
         </div>
-        {canOverlay && hasAnyBoxes && (
+        {canOverlay && (hasAnyBoxes || rois.length > 0) && (
           <div className="overlay-toggles">
             {OVERLAY_SOURCES.map((source) => (
               <button
@@ -492,6 +540,16 @@ function DetectionModal({ detection, onClose }) {
                 {source.label} ({boxes[source.key].length})
               </button>
             ))}
+            {rois.length > 0 && (
+              <button
+                type="button"
+                className={`chip${visible.rois ? ' active' : ''}`}
+                style={{ '--chip-color': ROI_COLOR }}
+                onClick={() => setVisible((v) => ({ ...v, rois: !v.rois }))}
+              >
+                {isMotionCrops ? 'Motion crops' : 'Sweep tiles'} ({rois.length})
+              </button>
+            )}
           </div>
         )}
         {stored && (
@@ -506,6 +564,16 @@ function DetectionModal({ detection, onClose }) {
                 viewBox={`0 0 ${frameWidth} ${frameHeight}`}
                 preserveAspectRatio="none"
               >
+                {visible.rois &&
+                  rois.map((roi, index) => (
+                    <RoiMarker
+                      key={`roi-${index}`}
+                      roi={roi}
+                      index={index}
+                      frameWidth={frameWidth}
+                      unit={isMotionCrops ? 'crop' : 'tile'}
+                    />
+                  ))}
                 {OVERLAY_SOURCES.filter((s) => visible[s.key]).map((source) =>
                   boxes[source.key].map((det, index) => (
                     <BoxMarker
@@ -532,6 +600,14 @@ function DetectionModal({ detection, onClose }) {
           <dd>{detection.upload_status}</dd>
           <dt>Size</dt>
           <dd>{(detection.file_size_bytes / 1024).toFixed(1)} KB</dd>
+          {frameWidth > 0 && frameHeight > 0 && (
+            <Fragment>
+              <dt>Resolution</dt>
+              <dd>
+                {frameWidth}×{frameHeight}
+              </dd>
+            </Fragment>
+          )}
           <dt>Image ID</dt>
           <dd className="mono">{detection.image_id}</dd>
           {modelStamps(metadata).map((stamp) => (
