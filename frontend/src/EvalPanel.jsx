@@ -10,6 +10,19 @@ const DISAGREEMENT_LIMIT = 24
 const FOMO_COLOR = '#f2a65a'
 const YOLO_COLOR = '#6fd08c'
 
+// Every model source gets a stable display name and color; unknown future
+// teachers fall back to their slug and a neutral tint.
+const SOURCE_STYLES = {
+  fomo: { name: 'FOMO', color: FOMO_COLOR },
+  yolo: { name: 'YOLO', color: YOLO_COLOR },
+  yolo26x: { name: 'YOLO26x', color: '#7aa2f7' },
+  'rtdetr-x': { name: 'RT-DETR-X', color: '#c678dd' },
+}
+
+function sourceStyle(source) {
+  return SOURCE_STYLES[source] ?? { name: source, color: '#9a9a9a' }
+}
+
 function pct(value) {
   if (value === null || value === undefined) return '—'
   return `${(value * 100).toFixed(1)}%`
@@ -46,11 +59,21 @@ export default function EvalView({ onSelectImage }) {
       }),
     refetchInterval: EVAL_POLL_INTERVAL_MS,
   })
+  const runsQuery = useQuery({
+    queryKey: ['teacher-runs'],
+    queryFn: () => apiFetch('/eval/teacher/runs', { params: { limit: 1 } }),
+    refetchInterval: EVAL_POLL_INTERVAL_MS,
+  })
 
   const summary = summaryQuery.data
   const pairs = summary?.pairs ?? []
   const unscored = summary?.unscored_images ?? 0
   const disagreements = disagreementsQuery.data?.disagreements ?? []
+  // The live pair (FOMO vs the Pi's YOLO) is scored as uploads arrive;
+  // everything else comes from the offline teacher batch. Different
+  // cadences, different meaning — shown as separate groups.
+  const livePairs = pairs.filter((pair) => pair.teacher_source === 'yolo')
+  const offlinePairs = pairs.filter((pair) => pair.teacher_source !== 'yolo')
 
   async function runBackfill() {
     setBackfilling(true)
@@ -72,11 +95,12 @@ export default function EvalView({ onSelectImage }) {
     <div className="eval-view">
       <section className="eval-panel">
         <div className="eval-panel-header">
-          <h2>Model agreement</h2>
+          <h2>Live agreement</h2>
           {summary && (
             <span className="eval-panel-note">
-              FOMO vs YOLO teacher · labels: {(summary.labels ?? []).join(', ')}{' '}
-              · teacher ≥ {summary.teacher_min_confidence}
+              scored as uploads arrive · labels:{' '}
+              {(summary.labels ?? []).join(', ')} · teacher ≥{' '}
+              {summary.teacher_min_confidence}
             </span>
           )}
           {unscored > 0 && (
@@ -105,38 +129,32 @@ export default function EvalView({ onSelectImage }) {
             Backfill failed: {backfillError}
           </p>
         )}
-        {summary && pairs.length === 0 && (
+        {summary && livePairs.length === 0 && (
           <p className="eval-panel-note">
             No images scored yet. Uploads are scored as they arrive.
           </p>
         )}
-        {pairs.map((pair) => (
-          <div
-            className="eval-pair"
-            key={`${pair.student_hash}-${pair.teacher_hash}`}
-          >
-            <span className="eval-models">
-              <span className="eval-model" style={{ '--chip-color': FOMO_COLOR }}>
-                FOMO {modelName(pair.student_version, pair.student_hash)}
-              </span>
-              {' vs '}
-              <span className="eval-model" style={{ '--chip-color': YOLO_COLOR }}>
-                YOLO {modelName(pair.teacher_version, pair.teacher_hash)}
-              </span>
-            </span>
-            <span className="eval-metric">
-              <strong>{pct(pair.agreement_precision)}</strong> precision
-            </span>
-            <span className="eval-metric">
-              <strong>{pct(pair.agreement_recall)}</strong> recall
-            </span>
-            <span className="eval-counts">
-              {pair.images} {pair.images === 1 ? 'image' : 'images'}
-              {pair.disagreement_images > 0 &&
-                ` · ${pair.disagreement_images} disagree`}
-              {pair.empty_images > 0 && ` · ${pair.empty_images} empty`}
-            </span>
-          </div>
+        {livePairs.map((pair) => (
+          <PairRow key={pairKey(pair)} pair={pair} />
+        ))}
+      </section>
+
+      <section className="eval-panel offline">
+        <div className="eval-panel-header">
+          <h2>Offline teachers</h2>
+          <span className="eval-panel-note">
+            bigger models, annotated by the nightly batch runner
+          </span>
+        </div>
+        <TeacherRunStatus run={runsQuery.data?.runs?.[0]} />
+        {summary && offlinePairs.length === 0 && (
+          <p className="eval-panel-note">
+            No teacher annotations yet — the nightly runner (or a manual
+            backfill run) populates this.
+          </p>
+        )}
+        {offlinePairs.map((pair) => (
+          <PairRow key={pairKey(pair)} pair={pair} />
         ))}
       </section>
 
@@ -173,6 +191,68 @@ export default function EvalView({ onSelectImage }) {
         </div>
       </section>
     </div>
+  )
+}
+
+function pairKey(pair) {
+  return `${pair.student_source}-${pair.student_hash}-${pair.teacher_source}-${pair.teacher_hash}`
+}
+
+function PairRow({ pair }) {
+  return (
+    <div className="eval-pair">
+      <span className="eval-models">
+        <span
+          className="eval-model"
+          style={{ '--chip-color': sourceStyle(pair.student_source).color }}
+        >
+          {sourceStyle(pair.student_source).name}{' '}
+          {modelName(pair.student_version, pair.student_hash)}
+        </span>
+        {' vs '}
+        <span
+          className="eval-model"
+          style={{ '--chip-color': sourceStyle(pair.teacher_source).color }}
+        >
+          {sourceStyle(pair.teacher_source).name}{' '}
+          {modelName(pair.teacher_version, pair.teacher_hash)}
+        </span>
+      </span>
+      <span className="eval-metric">
+        <strong>{pct(pair.agreement_precision)}</strong> precision
+      </span>
+      <span className="eval-metric">
+        <strong>{pct(pair.agreement_recall)}</strong> recall
+      </span>
+      <span className="eval-counts">
+        {pair.images} {pair.images === 1 ? 'image' : 'images'}
+        {pair.disagreement_images > 0 &&
+          ` · ${pair.disagreement_images} disagree`}
+        {pair.empty_images > 0 && ` · ${pair.empty_images} empty`}
+      </span>
+    </div>
+  )
+}
+
+function TeacherRunStatus({ run }) {
+  if (!run) return null
+  const counts = Object.entries(run.detail ?? {})
+    .filter(([, value]) => value && typeof value === 'object')
+    .map(
+      ([source, stats]) =>
+        `${sourceStyle(source).name}: ${stats.images ?? 0} images` +
+        (stats.errors > 0 ? ` (${stats.errors} errors)` : ''),
+    )
+  const when = formatTimestamp(run.finished_at ?? run.started_at)
+  return (
+    <p className="eval-panel-note">
+      Teacher run {run.status === 'running' ? 'started' : run.status} {when}
+      {run.runner ? ` on ${run.runner}` : ''}
+      {counts.length > 0 ? ` — ${counts.join(' · ')}` : ''}
+      {run.detail?.duration_s != null
+        ? ` — ${Math.round(run.detail.duration_s / 60)} min`
+        : ''}
+    </p>
   )
 }
 

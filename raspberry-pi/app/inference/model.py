@@ -9,7 +9,8 @@ from typing import Any
 
 
 INFERENCE_DIR = Path(__file__).resolve().parent
-DEFAULT_MODEL_PATH = INFERENCE_DIR / "models" / "yolo26m.pt"
+MODELS_DIR = INFERENCE_DIR / "models"
+DEFAULT_MODEL_PATH = MODELS_DIR / "yolo26m.pt"
 RUNS_DIR = INFERENCE_DIR / "runs"
 
 # Same convention as the Nicla firmware: a truncated SHA-256 of the deployed

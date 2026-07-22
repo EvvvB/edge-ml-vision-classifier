@@ -101,6 +101,44 @@ async def init_db(pool: asyncpg.Pool) -> None:
             )
             """
         )
+        # Offline teacher-model annotations, one row per (image, teacher
+        # family). teacher_hash records which weights produced the row;
+        # upgrading a teacher's weights annotates new images under the new
+        # hash without re-annotating history (re-runs can do that
+        # explicitly). Rows with error set mark images the teacher could not
+        # process, so they stop showing up as pending.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS teacher_annotations (
+                image_id UUID NOT NULL
+                    REFERENCES detections (image_id) ON DELETE CASCADE,
+                teacher_source TEXT NOT NULL,
+                teacher_hash TEXT NOT NULL,
+                teacher_manifest JSONB,
+                detections JSONB NOT NULL,
+                error TEXT,
+                inference_ms INT,
+                imgsz INT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (image_id, teacher_source)
+            )
+            """
+        )
+        # One row per teacher-runner invocation, so the dashboard can show
+        # whether the nightly batch actually ran and what it did.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS teacher_runs (
+                run_id UUID PRIMARY KEY,
+                runner TEXT,
+                status TEXT NOT NULL,
+                detail JSONB,
+                started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                finished_at TIMESTAMPTZ
+            )
+            """
+        )
         # Device registry, upserted from hellos and uploads. desired_mode is
         # the cloud's command (versioned by desired_mode_seq, the same
         # high-water-mark pattern as capture counters); reported_mode is what
@@ -725,6 +763,167 @@ def serialize_eval_row(row: asyncpg.Record) -> dict[str, Any]:
         if data.get(key) is not None:
             data[key] = str(data[key])
     return data
+
+
+# ---------------------------------------------------------------------------
+# Teacher annotations (offline batch runner)
+# ---------------------------------------------------------------------------
+
+
+async def fetch_pending_teacher_images(
+    pool: asyncpg.Pool,
+    *,
+    teacher_source: str,
+    limit: int,
+) -> list[str]:
+    """Stored images this teacher has not annotated yet, newest first.
+
+    Newest first so last night's captures get teacher labels on the next
+    run even while a large historical backlog drains over many nights.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT d.image_id
+            FROM detections d
+            LEFT JOIN teacher_annotations t
+                ON t.image_id = d.image_id AND t.teacher_source = $1
+            WHERE t.image_id IS NULL AND d.upload_status = 'stored'
+            ORDER BY d.created_at DESC, d.image_id
+            LIMIT $2
+            """,
+            teacher_source,
+            limit,
+        )
+    return [str(row["image_id"]) for row in rows]
+
+
+async def upsert_teacher_annotation(
+    pool: asyncpg.Pool,
+    *,
+    image_id: UUID,
+    teacher_source: str,
+    teacher_hash: str,
+    teacher_manifest: dict[str, Any] | None,
+    detections: list[dict[str, Any]],
+    error: str | None,
+    inference_ms: int | None,
+    imgsz: int | None,
+) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO teacher_annotations (
+                image_id, teacher_source, teacher_hash, teacher_manifest,
+                detections, error, inference_ms, imgsz
+            )
+            VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8)
+            ON CONFLICT (image_id, teacher_source) DO UPDATE SET
+                teacher_hash = $3,
+                teacher_manifest = $4::jsonb,
+                detections = $5::jsonb,
+                error = $6,
+                inference_ms = $7,
+                imgsz = $8,
+                updated_at = now()
+            """,
+            image_id,
+            teacher_source,
+            teacher_hash,
+            json.dumps(teacher_manifest) if teacher_manifest is not None else None,
+            json.dumps(detections),
+            error,
+            inference_ms,
+            imgsz,
+        )
+
+
+async def fetch_detections_by_ids(
+    pool: asyncpg.Pool,
+    image_ids: list[UUID],
+) -> dict[UUID, dict[str, Any]]:
+    """Metadata and captured_at for a batch of images, keyed by native id."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT image_id, metadata, captured_at
+            FROM detections
+            WHERE image_id = ANY($1::uuid[])
+            """,
+            image_ids,
+        )
+    result: dict[UUID, dict[str, Any]] = {}
+    for row in rows:
+        parsed = eval_input_row(row)
+        result[row["image_id"]] = parsed
+    return result
+
+
+async def insert_teacher_run(
+    pool: asyncpg.Pool,
+    *,
+    run_id: UUID,
+    runner: str | None,
+) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO teacher_runs (run_id, runner, status)
+            VALUES ($1, $2, 'running')
+            """,
+            run_id,
+            runner,
+        )
+
+
+async def finish_teacher_run(
+    pool: asyncpg.Pool,
+    *,
+    run_id: UUID,
+    status: str,
+    detail: dict[str, Any] | None,
+) -> bool:
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE teacher_runs
+            SET status = $2,
+                detail = $3::jsonb,
+                finished_at = now()
+            WHERE run_id = $1
+            """,
+            run_id,
+            status,
+            json.dumps(detail) if detail is not None else None,
+        )
+    return result.split()[-1] != "0"
+
+
+async def fetch_teacher_runs(
+    pool: asyncpg.Pool,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT run_id, runner, status, detail, started_at, finished_at
+            FROM teacher_runs
+            ORDER BY started_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    runs = []
+    for row in rows:
+        data = dict(row)
+        if isinstance(data.get("detail"), str):
+            data["detail"] = json.loads(data["detail"])
+        for key in ("run_id", "started_at", "finished_at"):
+            if data.get(key) is not None:
+                data[key] = str(data[key])
+        runs.append(data)
+    return runs
 
 
 # ---------------------------------------------------------------------------

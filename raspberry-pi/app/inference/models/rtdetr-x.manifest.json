@@ -1,0 +1,6 @@
+{
+  "model_version": "rtdetr-x-stock",
+  "base_model": "rtdetr-x",
+  "trained_at": null,
+  "notes": "Stock Ultralytics RT-DETR-X weights, zero fine-tuning. DETR-family offline teacher whose misses are uncorrelated with the YOLO models'; weights auto-download on first runner use."
+}

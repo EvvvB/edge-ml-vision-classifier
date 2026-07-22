@@ -2,19 +2,27 @@ from __future__ import annotations
 
 import math
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncpg
+
+import re
 
 from fastapi import HTTPException
 
 from app.config import settings
 from app.storage.postgres import (
+    fetch_detections_by_ids,
     fetch_detections_for_rescore,
     fetch_eval_disagreements,
     fetch_eval_summary,
+    fetch_pending_teacher_images,
+    fetch_teacher_runs,
     fetch_unscored_detections,
+    finish_teacher_run,
+    insert_teacher_run,
     upsert_eval_result,
+    upsert_teacher_annotation,
 )
 
 # FOMO is the student and Pi YOLO the teacher. The teacher is silver, not
@@ -377,3 +385,262 @@ async def run_backfill(
         "skipped": skipped,
         "complete": exhausted,
     }
+
+
+# ---------------------------------------------------------------------------
+# Teacher batch ingest (offline runner uploads)
+# ---------------------------------------------------------------------------
+
+TEACHER_SOURCE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
+TEACHER_HASH_PATTERN = re.compile(r"^[0-9a-f]{4,64}$")
+MAX_BATCH_ANNOTATIONS = 200
+# The live pipeline's own sources can never be teacher families; allowing
+# them would let a teacher row silently collide with phase-0 semantics.
+RESERVED_TEACHER_SOURCES = frozenset({STUDENT_SOURCE, TEACHER_SOURCE})
+
+
+def validate_teacher_identity(payload: dict[str, Any]) -> tuple[str, str]:
+    teacher_source = payload.get("teacher_source")
+    teacher_hash = payload.get("teacher_hash")
+    if (
+        not isinstance(teacher_source, str)
+        or not TEACHER_SOURCE_PATTERN.fullmatch(teacher_source)
+        or teacher_source in RESERVED_TEACHER_SOURCES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="teacher_source must be a short lowercase slug"
+            f" and not one of: {', '.join(sorted(RESERVED_TEACHER_SOURCES))}",
+        )
+    if not isinstance(teacher_hash, str) or not TEACHER_HASH_PATTERN.fullmatch(
+        teacher_hash
+    ):
+        raise HTTPException(
+            status_code=400, detail="teacher_hash must be a hex model hash"
+        )
+    return teacher_source, teacher_hash
+
+
+def build_teacher_eval_rows(
+    metadata: dict[str, Any],
+    *,
+    teacher_source: str,
+    teacher_hash: str,
+    teacher_version: str | None,
+    teacher_detections: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Score both edge models against one teacher's annotations.
+
+    FOMO is always scoreable (its detections rode in with the upload). The
+    Pi YOLO is scored too — that pairing measures what the bigger teacher
+    catches that the live model misses — but only when its inference
+    actually completed.
+    """
+    rows = []
+    students = [
+        (
+            STUDENT_SOURCE,
+            metadata.get("fomo_detections"),
+            optional_string(metadata.get("model_hash")),
+            manifest_version(metadata.get("model_manifest")),
+            True,
+        ),
+        (
+            TEACHER_SOURCE,
+            metadata.get("yolo_detections"),
+            optional_string(metadata.get("yolo_model_hash")),
+            manifest_version(metadata.get("yolo_model_manifest")),
+            metadata.get("inference_status") in (None, "complete"),
+        ),
+    ]
+    for source, detections, student_hash, student_version, scoreable in students:
+        if not scoreable:
+            continue
+        if not isinstance(detections, list):
+            detections = []
+        row = {
+            "student_source": source,
+            "teacher_source": teacher_source,
+            "student_hash": student_hash,
+            "student_version": student_version,
+            "teacher_hash": teacher_hash,
+            "teacher_version": teacher_version,
+            "status": "scored",
+            "skip_reason": None,
+        }
+        row.update(score_detections(detections, teacher_detections))
+        rows.append(row)
+    return rows
+
+
+async def receive_teacher_batch(
+    pool: asyncpg.Pool,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    teacher_source, teacher_hash = validate_teacher_identity(payload)
+    manifest = payload.get("teacher_manifest")
+    if manifest is not None and not isinstance(manifest, dict):
+        raise HTTPException(
+            status_code=400, detail="teacher_manifest must be an object"
+        )
+    annotations = payload.get("annotations")
+    if not isinstance(annotations, list) or not annotations:
+        raise HTTPException(
+            status_code=400, detail="annotations must be a non-empty list"
+        )
+    if len(annotations) > MAX_BATCH_ANNOTATIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"at most {MAX_BATCH_ANNOTATIONS} annotations per batch",
+        )
+
+    parsed: list[tuple[UUID, dict[str, Any]]] = []
+    for entry in annotations:
+        if not isinstance(entry, dict):
+            raise HTTPException(
+                status_code=400, detail="each annotation must be an object"
+            )
+        try:
+            image_id = UUID(str(entry.get("image_id")))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail="annotation image_id must be a UUID"
+            ) from exc
+        detections = entry.get("detections")
+        error = entry.get("error")
+        if error is not None and not isinstance(error, str):
+            raise HTTPException(
+                status_code=400, detail="annotation error must be a string"
+            )
+        if error is None and not isinstance(detections, list):
+            raise HTTPException(
+                status_code=400,
+                detail="annotation detections must be a list unless error is set",
+            )
+        parsed.append((image_id, entry))
+
+    detections_by_id = await fetch_detections_by_ids(
+        pool, [image_id for image_id, _ in parsed]
+    )
+    teacher_version = manifest_version(manifest)
+
+    annotated = 0
+    scored_rows = 0
+    unknown_images = 0
+    for image_id, entry in parsed:
+        detection_row = detections_by_id.get(image_id)
+        if detection_row is None:
+            # Never seen this image; nothing to attach the annotation to.
+            unknown_images += 1
+            continue
+        error = entry.get("error")
+        teacher_detections = entry.get("detections") if error is None else []
+        if not isinstance(teacher_detections, list):
+            teacher_detections = []
+        await upsert_teacher_annotation(
+            pool,
+            image_id=image_id,
+            teacher_source=teacher_source,
+            teacher_hash=teacher_hash,
+            teacher_manifest=manifest,
+            detections=teacher_detections,
+            error=error,
+            inference_ms=entry.get("inference_ms")
+            if isinstance(entry.get("inference_ms"), int)
+            else None,
+            imgsz=entry.get("imgsz") if isinstance(entry.get("imgsz"), int) else None,
+        )
+        annotated += 1
+        if error is not None:
+            continue
+        for row in build_teacher_eval_rows(
+            detection_row["metadata"],
+            teacher_source=teacher_source,
+            teacher_hash=teacher_hash,
+            teacher_version=teacher_version,
+            teacher_detections=teacher_detections,
+        ):
+            await upsert_eval_result(
+                pool,
+                image_id=image_id,
+                captured_at=detection_row["captured_at"],
+                **row,
+            )
+            scored_rows += 1
+
+    return {
+        "ok": True,
+        "annotated": annotated,
+        "scored_rows": scored_rows,
+        "unknown_images": unknown_images,
+    }
+
+
+async def list_teacher_pending(
+    pool: asyncpg.Pool,
+    *,
+    teacher_source: str,
+    limit: int,
+) -> dict[str, Any]:
+    if not TEACHER_SOURCE_PATTERN.fullmatch(teacher_source or ""):
+        raise HTTPException(
+            status_code=400, detail="teacher_source must be a short lowercase slug"
+        )
+    if limit < 1 or limit > 1000:
+        raise HTTPException(
+            status_code=400, detail="limit must be between 1 and 1000"
+        )
+    image_ids = await fetch_pending_teacher_images(
+        pool, teacher_source=teacher_source, limit=limit
+    )
+    return {"ok": True, "image_ids": image_ids}
+
+
+async def start_teacher_run(
+    pool: asyncpg.Pool,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    run_id = uuid4()
+    runner = payload.get("runner")
+    await insert_teacher_run(
+        pool,
+        run_id=run_id,
+        runner=str(runner) if runner is not None else None,
+    )
+    return {"ok": True, "run_id": str(run_id)}
+
+
+VALID_RUN_STATUSES = frozenset({"complete", "failed"})
+
+
+async def complete_teacher_run(
+    pool: asyncpg.Pool,
+    run_id: UUID,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    status = payload.get("status")
+    if status not in VALID_RUN_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of: {', '.join(sorted(VALID_RUN_STATUSES))}",
+        )
+    detail = payload.get("detail")
+    if detail is not None and not isinstance(detail, dict):
+        raise HTTPException(status_code=400, detail="detail must be an object")
+    updated = await finish_teacher_run(
+        pool, run_id=run_id, status=status, detail=detail
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="teacher run not found")
+    return {"ok": True}
+
+
+async def list_teacher_runs(
+    pool: asyncpg.Pool,
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    if limit < 1 or limit > 50:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 50")
+    runs = await fetch_teacher_runs(pool, limit=limit)
+    return {"ok": True, "runs": runs}

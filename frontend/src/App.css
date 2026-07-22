@@ -396,6 +396,16 @@ button.ghost:disabled {
   gap: 8px;
 }
 
+/* Live and offline agreement are separate cards; the accent edge makes
+   the split legible at a glance (green = per-upload, blue = nightly). */
+.eval-panel {
+  border-left: 3px solid #6fd08c;
+}
+
+.eval-panel.offline {
+  border-left-color: #7aa2f7;
+}
+
 .eval-section-header {
   display: flex;
   align-items: baseline;

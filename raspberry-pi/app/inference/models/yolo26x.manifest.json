@@ -1,0 +1,6 @@
+{
+  "model_version": "yolo26x-stock",
+  "base_model": "yolo26x",
+  "trained_at": null,
+  "notes": "Stock Ultralytics YOLO26x weights, zero fine-tuning. Offline teacher for the eval harness; weights auto-download on first runner use."
+}

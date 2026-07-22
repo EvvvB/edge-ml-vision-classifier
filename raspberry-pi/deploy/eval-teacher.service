@@ -1,0 +1,30 @@
+# Nightly offline teacher-model annotation batch. Started by
+# eval-teacher.timer, never enabled directly. Everything here is a fence,
+# not a reservation: the batch soaks up idle capacity and yields the
+# moment the live pipeline (vision-receiver.service) needs it.
+#
+#   sudo cp eval-teacher.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now eval-teacher.timer
+#   journalctl -u eval-teacher        # did it run last night?
+
+[Unit]
+Description=Eval teacher-model batch annotator
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ev
+WorkingDirectory=/home/ev/edge-ml-vision-classifier/raspberry-pi
+# Same cloud credentials the live receiver uses; see README.
+EnvironmentFile=/etc/vision-receiver.env
+ExecStart=/home/ev/edge-ml-vision-classifier/raspberry-pi/.venv/bin/python -m app.inference.batch.runner --max-images 500
+# Lowest CPU priority, ~1/6 share under contention, hard memory ceiling:
+# if the batch misbehaves it alone dies and the timer retries tomorrow.
+Nice=19
+CPUWeight=20
+MemoryMax=5G
+# Both teachers over a full 500-image backlog is ~2h on the Pi; give up
+# well before the next capture day starts.
+TimeoutStartSec=4h
