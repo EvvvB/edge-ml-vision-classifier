@@ -20,7 +20,9 @@
 #   1 short blue flash = image and metadata sent successfully
 #   1 long red light = Wi-Fi/API transfer failed
 #
-# LEDs remain off during normal operation.
+# LEDs remain off during normal operation. The silent_mode config knob
+# suppresses the detection/upload flashes entirely; boot and Wi-Fi-wait
+# indicators still show.
 
 import sensor
 import time
@@ -214,6 +216,24 @@ motion_diff_threshold = MOTION_DIFF_THRESHOLD
 min_confidence = MIN_CONFIDENCE
 model_enabled = True
 
+# Silent mode keeps the detection/upload LEDs dark during automated
+# operation (a visible blink can spook the animals being watched).
+# Boot and Wi-Fi-wait indicators still show: they predate any config
+# and matter for diagnosing a camera that never comes up.
+silent_mode = False
+
+
+def active_config():
+    """The knobs actually in effect, reported in hellos and config acks."""
+    return {
+        "full_sweep_interval_ms": full_sweep_interval_ms,
+        "crop_size": crop_size,
+        "motion_diff_threshold": motion_diff_threshold,
+        "min_confidence": min_confidence,
+        "model_enabled": model_enabled,
+        "silent_mode": silent_mode
+    }
+
 
 # ---------------------------------------------------------
 # Motion differencing
@@ -399,7 +419,7 @@ CAPTURE_MAX_BURST_FRAMES = 3
 # Device platform settings
 # ---------------------------------------------------------
 
-FIRMWARE_BUILD = "2026-07-22.1"
+FIRMWARE_BUILD = "2026-07-22.2"
 
 # Boot hello: registers this device with the Pi (and through it the cloud),
 # fetches the desired mode, and sets the RTC from the server clock. Retried
@@ -695,6 +715,7 @@ def apply_config(config, seq):
     global min_confidence
     global threshold_list
     global model_enabled
+    global silent_mode
     global config_seq_high_water
     global pending_config_ack
 
@@ -758,12 +779,17 @@ def apply_config(config, seq):
     if isinstance(enabled, bool):
         model_enabled = enabled
 
+    silent = config.get("silent_mode")
+    if isinstance(silent, bool):
+        silent_mode = silent
+
     print(
         "Config applied | sweep_ms:", full_sweep_interval_ms,
         "| crop:", crop_size,
         "| diff:", motion_diff_threshold,
         "| conf:", min_confidence,
         "| model:", model_enabled,
+        "| silent:", silent_mode,
         "| seq:", seq
     )
 
@@ -1503,7 +1529,14 @@ def send_hello():
         "device_id": DEVICE_ID,
         "hardware_id": hardware_id_hex(),
         "firmware_build": FIRMWARE_BUILD,
-        "model_hash": model_hash
+        "model_hash": model_hash,
+
+        # Self-report the running knobs so the dashboard can show real
+        # values instead of guessing at compiled-in defaults. On a boot
+        # hello this is the defaults at seq 0; the cloud keeps whichever
+        # report has the newest seq.
+        "config": active_config(),
+        "config_seq": config_seq_high_water
     }
 
     if model_manifest is not None:
@@ -1575,13 +1608,7 @@ def send_config_ack():
         response = post_json("/config-ack", {
             "device_id": DEVICE_ID,
             "seq": seq,
-            "config": {
-                "full_sweep_interval_ms": full_sweep_interval_ms,
-                "crop_size": crop_size,
-                "motion_diff_threshold": motion_diff_threshold,
-                "min_confidence": min_confidence,
-                "model_enabled": model_enabled
-            }
+            "config": active_config()
         })
         ok, _ = parse_json_response(response)
 
@@ -2015,7 +2042,7 @@ while True:
         >= DETECTION_LED_COOLDOWN_MS
     )
 
-    if total_detections > 0 and detection_led_ready:
+    if total_detections > 0 and detection_led_ready and not silent_mode:
         flash_led(
             red_led,
             count=1,
@@ -2079,7 +2106,10 @@ while True:
         # Apply the cooldown even when transmission fails.
         last_upload_ms = now
 
-        if upload_succeeded:
+        if silent_mode:
+            pass
+
+        elif upload_succeeded:
             # Short blue flash means the packet was transmitted.
             flash_led(
                 blue_led,

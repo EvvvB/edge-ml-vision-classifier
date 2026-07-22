@@ -86,6 +86,25 @@ const MODEL_OPTIONS = [
   { label: '0.7', value: 0.7 },
 ]
 
+const LED_OPTIONS = [
+  { label: 'On', value: 'on' },
+  { label: 'Silent', value: 'silent' },
+]
+
+function formatSweep(ms) {
+  if (ms == null) return null
+  if (ms < 60_000) return `${ms / 1000} s`
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)} min`
+  return `${Math.round(ms / 3_600_000)} h`
+}
+
+// Cameras self-report their running config in the boot hello, so even a
+// never-configured knob can show the device's real value instead of an
+// unknowable "firmware default".
+function placeholderLabel(reportedValue) {
+  return reportedValue == null ? 'firmware default' : `device: ${reportedValue}`
+}
+
 function configIsPending(device) {
   return (
     (device.desired_config_seq ?? 0) > 0 &&
@@ -247,7 +266,7 @@ function ConfigControls({ device, disabled }) {
               reported.model_enabled === false
                 ? 'model off'
                 : `confidence ${reported.min_confidence ?? '?'}`
-            }`
+            } · LEDs ${reported.silent_mode ? 'silent' : 'on'}`
           : 'The camera has not reported its config yet'
       }
     >
@@ -261,7 +280,9 @@ function ConfigControls({ device, disabled }) {
           }
         >
           {desired.full_sweep_interval_ms == null && (
-            <option value="">firmware default</option>
+            <option value="">
+              {placeholderLabel(formatSweep(reported?.full_sweep_interval_ms))}
+            </option>
           )}
           {SWEEP_INTERVAL_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>
@@ -281,7 +302,11 @@ function ConfigControls({ device, disabled }) {
           }
         >
           {desired.crop_size == null && (
-            <option value="">firmware default</option>
+            <option value="">
+              {placeholderLabel(
+                reported?.crop_size != null ? `${reported.crop_size} px` : null,
+              )}
+            </option>
           )}
           {CROP_SIZE_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>
@@ -301,7 +326,9 @@ function ConfigControls({ device, disabled }) {
           }
         >
           {desired.motion_diff_threshold == null && (
-            <option value="">firmware default</option>
+            <option value="">
+              {placeholderLabel(reported?.motion_diff_threshold)}
+            </option>
           )}
           {MOTION_THRESHOLD_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>
@@ -333,9 +360,49 @@ function ConfigControls({ device, disabled }) {
         >
           {desired.model_enabled !== false &&
             desired.min_confidence == null && (
-              <option value="">firmware default</option>
+              <option value="">
+                {placeholderLabel(
+                  reported?.model_enabled === false
+                    ? 'off'
+                    : reported?.min_confidence,
+                )}
+              </option>
             )}
           {MODEL_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="config-field">
+        LEDs
+        <select
+          value={
+            desired.silent_mode == null
+              ? ''
+              : desired.silent_mode
+                ? 'silent'
+                : 'on'
+          }
+          disabled={saving || disabled}
+          onChange={(event) =>
+            updateConfig({ silent_mode: event.target.value === 'silent' })
+          }
+        >
+          {desired.silent_mode == null && (
+            <option value="">
+              {placeholderLabel(
+                reported?.silent_mode == null
+                  ? null
+                  : reported.silent_mode
+                    ? 'silent'
+                    : 'on',
+              )}
+            </option>
+          )}
+          {LED_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>

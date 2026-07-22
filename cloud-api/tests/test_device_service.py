@@ -44,6 +44,7 @@ def test_validate_config_accepts_known_knobs() -> None:
     assert validate_config(
         {"model_enabled": False, "min_confidence": 1}
     ) == {"model_enabled": False, "min_confidence": 1.0}
+    assert validate_config({"silent_mode": True}) == {"silent_mode": True}
 
 
 @pytest.mark.parametrize(
@@ -69,6 +70,8 @@ def test_validate_config_accepts_known_knobs() -> None:
         {"min_confidence": True},
         {"model_enabled": "false"},
         {"model_enabled": 0},
+        {"silent_mode": "yes"},
+        {"silent_mode": 1},
     ],
 )
 def test_validate_config_rejects_bad_payloads(payload) -> None:
@@ -282,6 +285,8 @@ async def test_hello_returns_mode_and_server_time(monkeypatch) -> None:
         }
     )
     monkeypatch.setattr(device_service, "upsert_device_hello", upsert)
+    reported = AsyncMock()
+    monkeypatch.setattr(device_service, "record_reported_config", reported)
 
     transport = httpx.ASGITransport(app=main.app)
     async with main.lifespan(main.app):
@@ -296,6 +301,8 @@ async def test_hello_returns_mode_and_server_time(monkeypatch) -> None:
                     "firmware_build": "2026-07-19.1",
                     "model_hash": "ffff00ffff00",
                     "model_manifest": {"model_version": "v1"},
+                    "config": {"crop_size": 96, "silent_mode": False},
+                    "config_seq": 0,
                 },
             )
 
@@ -310,3 +317,7 @@ async def test_hello_returns_mode_and_server_time(monkeypatch) -> None:
     assert kwargs["device_id"] == "nicla-vision-01"
     assert kwargs["hardware_id"] == "a1b2c3"
     assert kwargs["model_manifest"] == {"model_version": "v1"}
+    # The camera's self-reported running config lands as reported truth.
+    reported_kwargs = reported.await_args.kwargs
+    assert reported_kwargs["config"] == {"crop_size": 96, "silent_mode": False}
+    assert reported_kwargs["seq"] == 0

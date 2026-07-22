@@ -111,11 +111,11 @@ def validate_config(payload: Any) -> dict[str, Any]:
                     detail="min_confidence must be a number between 0 and 1",
                 )
             config[key] = float(value)
-        elif key == "model_enabled":
+        elif key in ("model_enabled", "silent_mode"):
             if not isinstance(value, bool):
                 raise HTTPException(
                     status_code=400,
-                    detail="model_enabled must be a boolean",
+                    detail=f"{key} must be a boolean",
                 )
             config[key] = value
         else:
@@ -157,6 +157,20 @@ async def handle_device_hello(
         model_manifest=manifest,
         pi_id=optional_str(payload, "pi_id"),
     )
+
+    # Cameras self-report their running config at boot, so the dashboard
+    # shows real device values before any desired config ever existed.
+    # Stored as reported truth, unvalidated; the newest-seq guard keeps a
+    # boot-default report (seq 0) from clobbering a later ack.
+    reported = payload.get("config")
+    if isinstance(reported, dict):
+        try:
+            reported_seq = int(payload.get("config_seq") or 0)
+        except (TypeError, ValueError):
+            reported_seq = 0
+        await record_reported_config(
+            db, device_id=device_id, config=reported, seq=reported_seq
+        )
     answer = {
         "ok": True,
         "mode": device["desired_mode"],
