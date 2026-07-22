@@ -139,6 +139,40 @@ async def init_db(pool: asyncpg.Pool) -> None:
             )
             """
         )
+        # Arrival log shipped from each Pi's receipt files: one row per
+        # upload a Pi received from a camera, rejected uploads included —
+        # the only record of those, since rejected frames are never stored.
+        # receipt_id comes from the Pi and dedupes resent sync batches.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pi_receipts (
+                receipt_id UUID PRIMARY KEY,
+                pi_id TEXT,
+                device_id TEXT,
+                event TEXT NOT NULL,
+                image_id TEXT,
+                filename TEXT,
+                content_type TEXT,
+                fomo_count INT,
+                reason TEXT,
+                client_host TEXT,
+                logged_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_pi_receipts_logged_at
+            ON pi_receipts (logged_at DESC)
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_pi_receipts_device_id
+            ON pi_receipts (device_id)
+            """
+        )
         # Device registry, upserted from hellos and uploads. desired_mode is
         # the cloud's command (versioned by desired_mode_seq, the same
         # high-water-mark pattern as capture counters); reported_mode is what
@@ -1001,6 +1035,86 @@ async def fetch_teacher_runs(
                 data[key] = str(data[key])
         runs.append(data)
     return runs
+
+
+# ---------------------------------------------------------------------------
+# Pi receipt log
+# ---------------------------------------------------------------------------
+
+
+async def insert_pi_receipts(
+    pool: asyncpg.Pool,
+    receipts: list[dict[str, Any]],
+) -> int:
+    """Insert receipt rows, dropping ones already shipped; returns inserts."""
+    inserted = 0
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for receipt in receipts:
+                result = await conn.execute(
+                    """
+                    INSERT INTO pi_receipts (
+                        receipt_id, pi_id, device_id, event, image_id,
+                        filename, content_type, fomo_count, reason,
+                        client_host, logged_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    ON CONFLICT (receipt_id) DO NOTHING
+                    """,
+                    receipt["receipt_id"],
+                    receipt.get("pi_id"),
+                    receipt.get("device_id"),
+                    receipt["event"],
+                    receipt.get("image_id"),
+                    receipt.get("filename"),
+                    receipt.get("content_type"),
+                    receipt.get("fomo_count"),
+                    receipt.get("reason"),
+                    receipt.get("client_host"),
+                    receipt.get("logged_at"),
+                )
+                if result.split()[-1] != "0":
+                    inserted += 1
+    return inserted
+
+
+async def fetch_pi_receipts(
+    pool: asyncpg.Pool,
+    *,
+    device_id: str | None,
+    event: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    clauses: list[str] = []
+    if device_id is not None:
+        params.append(device_id)
+        clauses.append(f"device_id = ${len(params)}")
+    if event is not None:
+        params.append(event)
+        clauses.append(f"event = ${len(params)}")
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT *
+            FROM pi_receipts{where}
+            ORDER BY coalesce(logged_at, created_at) DESC
+            LIMIT ${len(params) + 1}
+            """,
+            *params,
+            limit,
+        )
+
+    receipts = []
+    for row in rows:
+        data = dict(row)
+        for key in ("receipt_id", "logged_at", "created_at"):
+            if data.get(key) is not None:
+                data[key] = str(data[key])
+        receipts.append(data)
+    return receipts
 
 
 # ---------------------------------------------------------------------------

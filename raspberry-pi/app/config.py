@@ -32,6 +32,15 @@ class Settings:
     # the centroid drift of a split object.
     tile_boundary_band_pixels: int = 40
 
+    # Receipt log: one JSONL line per upload the Pi receives from a camera,
+    # accepted or rejected. Shipped to the cloud by receipt-sync.timer and
+    # pruned locally once synced and older than the retention window.
+    receipt_log_dir: Path = BASE_DIR / "receipts"
+    receipt_retention_days: int = int(os.environ.get("RECEIPT_RETENTION_DAYS", "14"))
+    receipt_sync_batch_size: int = int(
+        os.environ.get("RECEIPT_SYNC_BATCH_SIZE", "500")
+    )
+
     # Cloud forwarding. Leaving CLOUD_API_URL unset disables forwarding, so
     # the Pi keeps working standalone.
     cloud_api_url: str = os.environ.get("CLOUD_API_URL", "")

@@ -12,6 +12,7 @@ from app.api.captures import router as captures_router
 from app.api.detections import router as detections_router
 from app.api.devices import router as devices_router
 from app.api.eval import router as eval_router
+from app.api.receipts import router as receipts_router
 from app.config import settings
 from app.services.capture_service import CaptureBroadcaster
 from app.services.device_service import PreviewStore
@@ -43,6 +44,7 @@ app.include_router(detections_router)
 app.include_router(captures_router)
 app.include_router(devices_router)
 app.include_router(eval_router)
+app.include_router(receipts_router)
 
 # The built frontend (frontend/ -> npm run build) lands in static/; serve it
 # from the same origin as the API. API routes above take precedence over the

@@ -16,11 +16,39 @@ from app.inference.model import model_identity, predict_image
 from app.services.capture_relay import remember_device_address
 from app.services.cloud_forwarder import forward_detection
 from app.services.coco import normalize_fomo_detections, normalize_yolo_detections
+from app.services.receipt_log import record_receipt
 from app.services.tile_dedupe import deduplicate_tile_detections
 from app.storage.filesystem import save_upload, save_upload_bytes, update_metadata
 
 
 async def receive_detection_upload(
+    image: UploadFile,
+    raw_metadata: str,
+    background_tasks: BackgroundTasks,
+    client_host: str | None = None,
+) -> dict[str, Any]:
+    # Every upload leaves a receipt line, rejected ones included — the
+    # receipt log is where a misbehaving camera becomes visible.
+    try:
+        return await accept_detection_upload(
+            image=image,
+            raw_metadata=raw_metadata,
+            background_tasks=background_tasks,
+            client_host=client_host,
+        )
+    except HTTPException as exc:
+        record_receipt(
+            "rejected",
+            device_id=best_effort_device_id(raw_metadata),
+            filename=image.filename,
+            content_type=image.content_type,
+            client_host=client_host,
+            reason=str(exc.detail),
+        )
+        raise
+
+
+async def accept_detection_upload(
     image: UploadFile,
     raw_metadata: str,
     background_tasks: BackgroundTasks,
@@ -69,6 +97,16 @@ async def receive_detection_upload(
     )
     background_tasks.add_task(run_inference_job, image_path, metadata_path)
 
+    record_receipt(
+        "accepted",
+        device_id=str(device_id) if device_id is not None else None,
+        image_id=image_id,
+        filename=image.filename,
+        content_type=image.content_type,
+        client_host=client_host,
+        fomo_count=len(fomo_detections),
+    )
+
     return {
         "ok": True,
         "status": "accepted",
@@ -80,6 +118,22 @@ async def receive_detection_upload(
         "metadata_saved_to": str(metadata_path),
         "inference_status": "queued",
     }
+
+
+def best_effort_device_id(raw_metadata: str) -> str | None:
+    """Recover device_id for a rejection receipt, if the metadata allows.
+
+    Rejections often mean broken metadata, so this must not assume any of
+    the guarantees parse_metadata enforces.
+    """
+    try:
+        metadata = json.loads(raw_metadata)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    device_id = metadata.get("device_id")
+    return str(device_id) if device_id is not None else None
 
 
 async def save_raw_upload(

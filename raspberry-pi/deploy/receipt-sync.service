@@ -1,0 +1,26 @@
+# Ships the Pi's upload receipt log (accepted and rejected camera uploads)
+# to the cloud in batches. Started by receipt-sync.timer, never enabled
+# directly. Resends are deduped cloud-side, so a failed run just leaves the
+# lines for the next firing.
+#
+#   sudo cp receipt-sync.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now receipt-sync.timer
+#   journalctl -u receipt-sync        # what shipped last run?
+
+[Unit]
+Description=Receipt log cloud sync
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ev
+WorkingDirectory=/home/ev/edge-ml-vision-classifier/raspberry-pi
+# Same cloud credentials the live receiver uses; see README.
+EnvironmentFile=/etc/vision-receiver.env
+ExecStart=/home/ev/edge-ml-vision-classifier/raspberry-pi/.venv/bin/python -m app.services.receipt_sync
+Nice=10
+# A run ships at most a few thousand small JSON lines; anything longer is
+# a hung network call, and the next timer firing picks up where it left off.
+TimeoutStartSec=10m
