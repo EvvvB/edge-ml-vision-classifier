@@ -1,4 +1,5 @@
-# Fires receipt-sync.service every 15 minutes. Persistent=true runs a
+# Fires receipt-sync.service every minute — cheap, because the sync makes
+# no cloud calls when nothing new is pending. Persistent=true runs a
 # missed window at next boot, and systemd never starts a second instance
 # while one is still running.
 
@@ -6,11 +7,11 @@
 Description=Periodic receipt log cloud sync
 
 [Timer]
-OnCalendar=*:0/15
+OnCalendar=minutely
 Persistent=true
-# Spread start over a minute so a future second Pi doesn't sync-hit the
-# cloud API at the same second.
-RandomizedDelaySec=60
+# Small jitter so a future second Pi doesn't sync-hit the cloud API at
+# the same second; kept well under the interval.
+RandomizedDelaySec=10
 
 [Install]
 WantedBy=timers.target

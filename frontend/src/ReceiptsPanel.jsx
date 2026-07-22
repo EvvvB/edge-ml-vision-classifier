@@ -2,9 +2,9 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiFetch } from './api.js'
 
-// Receipts arrive in 15-minute sync batches from the Pi, so polling faster
-// than the detection grid would only re-read the same rows.
-const RECEIPTS_POLL_INTERVAL_MS = 60_000
+// The Pi ships receipts every minute, so poll on the same cadence as the
+// detection grid.
+const RECEIPTS_POLL_INTERVAL_MS = 30_000
 const RECEIPTS_LIMIT = 200
 
 const EVENT_STYLES = {
@@ -54,7 +54,7 @@ export default function ReceiptsPanel({ devices }) {
         <h2>Upload receipts</h2>
         <span className="eval-panel-note">
           every upload the Pi received from a camera — rejections included.
-          Synced from the Pi every 15 minutes.
+          Synced from the Pi every minute.
         </span>
         <div className="receipt-filters">
           {['any', 'accepted', 'rejected'].map((value) => (
@@ -97,7 +97,7 @@ export default function ReceiptsPanel({ devices }) {
       )}
       {receiptsQuery.data && receipts.length === 0 && (
         <p className="dashboard-status">
-          No receipts yet — they appear after the Pi's next 15-minute sync.
+          No receipts yet — they appear within a minute of the next upload.
         </p>
       )}
 
