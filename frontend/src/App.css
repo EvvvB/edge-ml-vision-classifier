@@ -665,6 +665,27 @@ button.ghost:disabled {
   cursor: default;
 }
 
+.config-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.config-field select {
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.config-field select:disabled {
+  opacity: 0.45;
+}
+
 .device-card .capture-button {
   margin-left: auto;
   padding: 6px 12px;

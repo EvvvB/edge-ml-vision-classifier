@@ -170,14 +170,49 @@ MOTION_MAX_CROPS = 3
 # prepared with matching 96 x 96 object-centered crops.
 CROP_SIZE = 96
 
+# Motion crops may instead be cut at 192 x 192 and downsampled by the
+# model preprocessing to the 96 x 96 input: less detail per pixel, but
+# four times the field of view around the motion center for scenes
+# where objects keep slipping out of the tight crop.
+CONFIG_CROP_SIZES = (96, 192)
+
 # When changed pixels cover this fraction of the frame the difference
 # is global (lighting shift, exposure step), not an object entering;
 # fall back to a full tile sweep instead of trusting the blobs.
 MOTION_GLOBAL_CHANGE_FRACTION = 0.4
 
 # Differencing cannot see an object once it stops moving, so a full
-# tile sweep still runs at this interval as a safety net.
-FULL_SWEEP_INTERVAL_MS = 5000
+# tile sweep still runs at this interval as a safety net. Kept long
+# because the stock model over-detects and each sweep is six chances
+# for a false positive to become an upload; motion crops carry the
+# real signal.
+FULL_SWEEP_INTERVAL_MS = 10 * 60 * 1000
+
+CONFIG_MIN_SWEEP_INTERVAL_MS = 5000
+CONFIG_MAX_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000
+CONFIG_MIN_DIFF_THRESHOLD = 5
+CONFIG_MAX_DIFF_THRESHOLD = 128
+
+
+# ---------------------------------------------------------
+# Remote-configurable settings
+# ---------------------------------------------------------
+#
+# The dashboard owns these knobs; the Pi pushes them here as
+# config:<seq>:<json> datagrams under the same high-water/ack
+# discipline as desired mode. The constants above are the boot
+# defaults, used until (and unless) a config ever arrives.
+#
+# model_enabled False turns the camera into a pure motion recorder:
+# FOMO never runs, every motion event uploads its crops unfiltered
+# (unbiased training data), and the sweep timer uploads a whole-frame
+# scene reference instead of running tiles.
+
+full_sweep_interval_ms = FULL_SWEEP_INTERVAL_MS
+crop_size = CROP_SIZE
+motion_diff_threshold = MOTION_DIFF_THRESHOLD
+min_confidence = MIN_CONFIDENCE
+model_enabled = True
 
 
 # ---------------------------------------------------------
@@ -199,7 +234,7 @@ previous_small = sensor.alloc_extra_fb(
 background_valid = False
 
 motion_diff_thresholds = [
-    (MOTION_DIFF_THRESHOLD, 255)
+    (motion_diff_threshold, 255)
 ]
 
 
@@ -228,19 +263,19 @@ def point_in_roi(x, y, roi):
 
 def crop_roi_around(center_x, center_y):
     """Fixed-size square crop centered on a point, clamped to the frame."""
-    half = CROP_SIZE // 2
+    half = crop_size // 2
 
     x = min(
         max(center_x - half, 0),
-        FRAME_WIDTH - CROP_SIZE
+        FRAME_WIDTH - crop_size
     )
 
     y = min(
         max(center_y - half, 0),
-        FRAME_HEIGHT - CROP_SIZE
+        FRAME_HEIGHT - crop_size
     )
 
-    return (x, y, CROP_SIZE, CROP_SIZE)
+    return (x, y, crop_size, crop_size)
 
 
 def detect_motion_regions(img):
@@ -348,6 +383,10 @@ UPLOAD_FAILURE_LED_ON_MS = 1500
 # with the same high-water-mark discipline on <seq>. The Pi resends a mode
 # datagram until this device acknowledges it over HTTP, so delivery relies
 # on repetition, never on any single packet.
+#
+# Remote config arrives as b"config:<seq>:<json>" with the same seq/ack
+# scheme; the JSON payload stays far below one WiFi MTU, so a datagram
+# never fragments and arrives whole or not at all.
 CAPTURE_UDP_PORT = 5005
 
 # Upper bound on frames queued from one counter jump. Protects against a
@@ -360,7 +399,7 @@ CAPTURE_MAX_BURST_FRAMES = 3
 # Device platform settings
 # ---------------------------------------------------------
 
-FIRMWARE_BUILD = "2026-07-19.1"
+FIRMWARE_BUILD = "2026-07-22.1"
 
 # Boot hello: registers this device with the Pi (and through it the cloud),
 # fetches the desired mode, and sets the RTC from the server clock. Retried
@@ -589,6 +628,11 @@ current_mode = "automated"
 mode_seq_high_water = 0
 pending_mode_ack = None
 
+# Remote-config state, same discipline. pending_config_ack holds only the
+# seq; the ack body reports the applied values read at send time.
+config_seq_high_water = 0
+pending_config_ack = None
+
 
 def apply_mode(mode, seq):
     """Adopt a desired mode if its seq is new; queue the ack.
@@ -628,13 +672,102 @@ def apply_mode(mode, seq):
             background_valid = False
             last_full_sweep_ms = time.ticks_add(
                 time.ticks_ms(),
-                -FULL_SWEEP_INTERVAL_MS
+                -full_sweep_interval_ms
             )
 
         current_mode = mode
         print("Mode applied:", mode, "| seq:", seq)
 
     pending_mode_ack = (mode, seq)
+
+
+def apply_config(config, seq):
+    """Adopt desired config if its seq is new; queue the ack.
+
+    Out-of-range values and unknown keys are skipped rather than
+    rejected: the seq is acked either way, so a firmware older than the
+    cloud converges instead of leaving the Pi retrying forever.
+    """
+    global full_sweep_interval_ms
+    global crop_size
+    global motion_diff_threshold
+    global motion_diff_thresholds
+    global min_confidence
+    global threshold_list
+    global model_enabled
+    global config_seq_high_water
+    global pending_config_ack
+
+    if not isinstance(config, dict):
+        return
+
+    try:
+        seq = int(seq)
+    except (ValueError, TypeError):
+        return
+
+    if seq < config_seq_high_water:
+        return
+
+    if seq == config_seq_high_water:
+        if seq > 0:
+            pending_config_ack = seq
+        return
+
+    config_seq_high_water = seq
+
+    interval = config.get("full_sweep_interval_ms")
+    if (
+        isinstance(interval, int)
+        and CONFIG_MIN_SWEEP_INTERVAL_MS <= interval
+        and interval <= CONFIG_MAX_SWEEP_INTERVAL_MS
+    ):
+        full_sweep_interval_ms = interval
+
+    size = config.get("crop_size")
+    if size in CONFIG_CROP_SIZES:
+        crop_size = size
+
+    diff = config.get("motion_diff_threshold")
+    if (
+        isinstance(diff, int)
+        and not isinstance(diff, bool)
+        and CONFIG_MIN_DIFF_THRESHOLD <= diff
+        and diff <= CONFIG_MAX_DIFF_THRESHOLD
+    ):
+        motion_diff_threshold = diff
+        motion_diff_thresholds = [
+            (motion_diff_threshold, 255)
+        ]
+
+    confidence = config.get("min_confidence")
+    if (
+        isinstance(confidence, (int, float))
+        and not isinstance(confidence, bool)
+        and 0.0 <= confidence
+        and confidence <= 1.0
+    ):
+        min_confidence = float(confidence)
+        # The confidence gate lives in the FOMO heatmap blob cutoff,
+        # which is precomputed; rebuild it or the change is silent.
+        threshold_list = [
+            (math.ceil(min_confidence * 255), 255)
+        ]
+
+    enabled = config.get("model_enabled")
+    if isinstance(enabled, bool):
+        model_enabled = enabled
+
+    print(
+        "Config applied | sweep_ms:", full_sweep_interval_ms,
+        "| crop:", crop_size,
+        "| diff:", motion_diff_threshold,
+        "| conf:", min_confidence,
+        "| model:", model_enabled,
+        "| seq:", seq
+    )
+
+    pending_config_ack = seq
 
 
 def ensure_capture_socket():
@@ -664,7 +797,8 @@ def ensure_capture_socket():
 
 
 def parse_trigger_datagram(payload):
-    """b"snap:<n>" -> ("snap", n); b"mode:<seq>:<value>" -> ("mode", seq, value)."""
+    """b"snap:<n>" -> ("snap", n); b"mode:<seq>:<value>" -> ("mode", seq, value);
+    b"config:<seq>:<json>" -> ("config", seq, dict)."""
     try:
         text = payload.decode("utf-8").strip()
     except Exception:
@@ -692,6 +826,24 @@ def parse_trigger_datagram(payload):
 
         return ("mode", seq, pieces[2])
 
+    if text.startswith("config:"):
+        # maxsplit keeps the JSON intact: it contains colons of its own.
+        pieces = text.split(":", 2)
+
+        if len(pieces) != 3:
+            return None
+
+        try:
+            seq = int(pieces[1])
+            config = json.loads(pieces[2])
+        except (ValueError, TypeError):
+            return None
+
+        if not isinstance(config, dict):
+            return None
+
+        return ("config", seq, config)
+
     return None
 
 
@@ -712,10 +864,13 @@ def poll_capture_trigger():
 
     highest_seen = 0
     mode_update = None
+    config_update = None
 
     while True:
         try:
-            payload, _sender = capture_socket.recvfrom(64)
+            # Sized for config JSON with headroom; snap/mode datagrams
+            # stay tiny. LWIP truncates anything past the buffer.
+            payload, _sender = capture_socket.recvfrom(512)
         except OSError:
             # Non-blocking socket with nothing queued.
             break
@@ -729,11 +884,18 @@ def poll_capture_trigger():
             if parsed[1] > highest_seen:
                 highest_seen = parsed[1]
 
-        elif mode_update is None or parsed[1] > mode_update[0]:
-            mode_update = (parsed[1], parsed[2])
+        elif parsed[0] == "mode":
+            if mode_update is None or parsed[1] > mode_update[0]:
+                mode_update = (parsed[1], parsed[2])
+
+        elif config_update is None or parsed[1] > config_update[0]:
+            config_update = (parsed[1], parsed[2])
 
     if mode_update is not None:
         apply_mode(mode_update[1], mode_update[0])
+
+    if config_update is not None:
+        apply_config(config_update[1], config_update[0])
 
     if highest_seen <= capture_high_water:
         return
@@ -840,7 +1002,17 @@ def build_detection_metadata(
             list(roi) for roi in inference_rois
         ],
 
-        "minimum_confidence": MIN_CONFIDENCE,
+        "minimum_confidence": min_confidence,
+
+        # Remote-config stamp: which knob settings produced this upload,
+        # so evals never silently mix capture regimes. model_enabled
+        # False tells the eval layer FOMO never ran on this frame.
+        "config_seq": config_seq_high_water,
+        "crop_size": crop_size,
+        "full_sweep_interval_ms": full_sweep_interval_ms,
+        "motion_diff_threshold": motion_diff_threshold,
+        "model_enabled": model_enabled,
+
         "model_hash": model_hash,
         "nicla_uptime_ms": time.ticks_ms(),
         "detection_count": len(metadata_detections),
@@ -1355,6 +1527,7 @@ def send_hello():
         debug_print("RTC set from server time:", server_time)
 
     apply_mode(body.get("mode"), body.get("seq"))
+    apply_config(body.get("config"), body.get("config_seq"))
     print("Hello ok | mode:", current_mode, "| seq:", mode_seq_high_water)
     return True
 
@@ -1383,6 +1556,42 @@ def send_mode_ack():
     if ok:
         pending_mode_ack = None
         debug_print("Mode ack sent:", mode, "| seq:", seq)
+
+
+def send_config_ack():
+    """Confirm the applied config to the Pi; kept pending until it lands.
+
+    The body reports the values actually in effect, so the dashboard
+    shows what the camera runs, not what the cloud asked for.
+    """
+    global pending_config_ack
+
+    if pending_config_ack is None:
+        return
+
+    seq = pending_config_ack
+
+    try:
+        response = post_json("/config-ack", {
+            "device_id": DEVICE_ID,
+            "seq": seq,
+            "config": {
+                "full_sweep_interval_ms": full_sweep_interval_ms,
+                "crop_size": crop_size,
+                "motion_diff_threshold": motion_diff_threshold,
+                "min_confidence": min_confidence,
+                "model_enabled": model_enabled
+            }
+        })
+        ok, _ = parse_json_response(response)
+
+    except Exception as error:
+        debug_print("Config ack failed:", error)
+        return
+
+    if ok:
+        pending_config_ack = None
+        debug_print("Config ack sent | seq:", seq)
 
 
 def send_tick():
@@ -1579,7 +1788,7 @@ last_detection_led_ms = time.ticks_add(
 
 last_full_sweep_ms = time.ticks_add(
     time.ticks_ms(),
-    -FULL_SWEEP_INTERVAL_MS
+    -full_sweep_interval_ms
 )
 
 last_preview_ms = time.ticks_add(
@@ -1588,6 +1797,11 @@ last_preview_ms = time.ticks_add(
 )
 
 last_mode_ack_attempt_ms = time.ticks_add(
+    time.ticks_ms(),
+    -MODE_ACK_RETRY_MS
+)
+
+last_config_ack_attempt_ms = time.ticks_add(
     time.ticks_ms(),
     -MODE_ACK_RETRY_MS
 )
@@ -1646,6 +1860,16 @@ while True:
         last_mode_ack_attempt_ms = now
         send_mode_ack()
 
+    if pending_config_ack is not None and (
+        time.ticks_diff(
+            now,
+            last_config_ack_attempt_ms
+        )
+        >= MODE_ACK_RETRY_MS
+    ):
+        last_config_ack_attempt_ms = now
+        send_config_ack()
+
     manual_capture_due = pending_manual_captures > 0
 
     # -----------------------------------------------------
@@ -1687,15 +1911,19 @@ while True:
             now,
             last_full_sweep_ms
         )
-        >= FULL_SWEEP_INTERVAL_MS
+        >= full_sweep_interval_ms
     )
 
     if manual_capture_due or global_change or full_sweep_due:
-        inference_mode = "full_sweep"
-        inference_rois = tile_rois
+        # With the model off, the sweep timer still fires but uploads
+        # one whole frame as a scene reference instead of running tiles.
+        inference_mode = "full_sweep" if model_enabled else "reference_frame"
+        inference_rois = tile_rois if model_enabled else []
         last_full_sweep_ms = now
     elif motion_rois:
-        inference_mode = "motion_crops"
+        # With the model off, motion crops upload unfiltered: the ROIs
+        # are stamped so the dashboard shows what moved, nothing infers.
+        inference_mode = "motion_crops" if model_enabled else "motion_only"
         inference_rois = motion_rois
     else:
         # Nothing changed since the previous frame; skip inference
@@ -1707,7 +1935,9 @@ while True:
     # Run inference on the chosen regions
     # -----------------------------------------------------
 
-    for roi_number, inference_roi in enumerate(inference_rois):
+    for roi_number, inference_roi in enumerate(
+        inference_rois if model_enabled else []
+    ):
         roi_input = Normalization(
             roi=inference_roi
         )(img)
@@ -1806,12 +2036,20 @@ while True:
         >= UPLOAD_COOLDOWN_MS
     )
 
+    # With the model running, only frames with detections are worth the
+    # bandwidth. With it off, motion itself is the event (unfiltered
+    # training data) and reference frames ride the sweep timer.
+    if model_enabled:
+        upload_worthy = total_detections > 0
+    else:
+        upload_worthy = inference_mode in ("motion_only", "reference_frame")
+
     # Manual captures bypass the detection gate and the cooldown: the
     # user asked for this frame, so it uploads even when nothing was
     # detected. One frame is consumed per queued press.
     should_upload = wireless_configured() and (
         manual_capture_due
-        or (total_detections > 0 and upload_cooldown_complete)
+        or (upload_worthy and upload_cooldown_complete)
     )
 
     if should_upload:

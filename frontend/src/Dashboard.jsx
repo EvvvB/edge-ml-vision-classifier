@@ -548,7 +548,10 @@ function RoiMarker({ roi, index, frameWidth, unit }) {
 
 function DetectionModal({ detection, onClose, onDelete }) {
   const metadata = detection.metadata ?? {}
-  const isMotionCrops = metadata.inference_mode === 'motion_crops'
+  // motion_only is the model-off variant: same crop ROIs, no FOMO boxes.
+  const isMotionCrops =
+    metadata.inference_mode === 'motion_crops' ||
+    metadata.inference_mode === 'motion_only'
 
   // ROI outlines start visible for motion-crop uploads, where "what did the
   // model actually see" is the interesting question; for full sweeps the 2x3

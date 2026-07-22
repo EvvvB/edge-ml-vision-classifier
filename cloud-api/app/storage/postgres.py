@@ -193,12 +193,33 @@ async def init_db(pool: asyncpg.Pool) -> None:
                 reported_mode TEXT,
                 reported_mode_seq BIGINT,
                 reported_mode_at TIMESTAMPTZ,
+                desired_config JSONB,
+                desired_config_seq BIGINT NOT NULL DEFAULT 0,
+                desired_config_at TIMESTAMPTZ,
+                reported_config JSONB,
+                reported_config_seq BIGINT,
+                reported_config_at TIMESTAMPTZ,
                 first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 last_hello_at TIMESTAMPTZ,
                 last_upload_at TIMESTAMPTZ,
                 last_seen_at TIMESTAMPTZ,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
+            """
+        )
+        # Remote-config columns postdate deployed registries; these alters
+        # bring an existing table up to the schema above and no-op on a
+        # fresh one.
+        await conn.execute(
+            """
+            ALTER TABLE devices
+                ADD COLUMN IF NOT EXISTS desired_config JSONB,
+                ADD COLUMN IF NOT EXISTS desired_config_seq BIGINT
+                    NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS desired_config_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS reported_config JSONB,
+                ADD COLUMN IF NOT EXISTS reported_config_seq BIGINT,
+                ADD COLUMN IF NOT EXISTS reported_config_at TIMESTAMPTZ
             """
         )
 
@@ -1124,6 +1145,8 @@ async def fetch_pi_receipts(
 DEVICE_TIMESTAMP_KEYS = (
     "desired_mode_at",
     "reported_mode_at",
+    "desired_config_at",
+    "reported_config_at",
     "first_seen_at",
     "last_hello_at",
     "last_upload_at",
@@ -1131,11 +1154,18 @@ DEVICE_TIMESTAMP_KEYS = (
     "updated_at",
 )
 
+DEVICE_JSON_KEYS = (
+    "model_manifest",
+    "desired_config",
+    "reported_config",
+)
+
 
 def serialize_device_row(row: asyncpg.Record) -> dict[str, Any]:
     data = dict(row)
-    if isinstance(data.get("model_manifest"), str):
-        data["model_manifest"] = json.loads(data["model_manifest"])
+    for key in DEVICE_JSON_KEYS:
+        if isinstance(data.get(key), str):
+            data[key] = json.loads(data[key])
     for key in DEVICE_TIMESTAMP_KEYS:
         if data.get(key) is not None:
             data[key] = data[key].isoformat()
@@ -1335,6 +1365,86 @@ async def fetch_desired_mode(
     if row is None:
         return "automated", 0
     return row["desired_mode"], row["desired_mode_seq"]
+
+
+async def set_desired_config(
+    pool: asyncpg.Pool,
+    *,
+    device_id: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    # The jsonb merge lets one request adjust a single knob without
+    # clobbering the others already set on the device.
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO devices (device_id, desired_config,
+                                 desired_config_seq, desired_config_at)
+            VALUES ($1, $2::jsonb, 1, now())
+            ON CONFLICT (device_id) DO UPDATE SET
+                desired_config =
+                    coalesce(devices.desired_config, '{}'::jsonb)
+                    || $2::jsonb,
+                desired_config_seq = devices.desired_config_seq + 1,
+                desired_config_at = now(),
+                updated_at = now()
+            RETURNING *
+            """,
+            device_id,
+            json.dumps(config),
+        )
+    return serialize_device_row(row)
+
+
+async def fetch_desired_config(
+    pool: asyncpg.Pool,
+    device_id: str,
+) -> tuple[dict[str, Any] | None, int]:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT desired_config, desired_config_seq
+            FROM devices WHERE device_id = $1
+            """,
+            device_id,
+        )
+    if row is None:
+        return None, 0
+    config = row["desired_config"]
+    if config is None:
+        return None, row["desired_config_seq"]
+    if isinstance(config, str):
+        config = json.loads(config)
+    return config, row["desired_config_seq"]
+
+
+async def record_reported_config(
+    pool: asyncpg.Pool,
+    *,
+    device_id: str,
+    config: dict[str, Any],
+    seq: int,
+) -> None:
+    # Same stale-ack guard as reported modes.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO devices (device_id, reported_config,
+                                 reported_config_seq, reported_config_at,
+                                 last_seen_at)
+            VALUES ($1, $2::jsonb, $3, now(), now())
+            ON CONFLICT (device_id) DO UPDATE SET
+                reported_config = $2::jsonb,
+                reported_config_seq = $3,
+                reported_config_at = now(),
+                last_seen_at = now(),
+                updated_at = now()
+            WHERE coalesce(devices.reported_config_seq, -1) <= $3
+            """,
+            device_id,
+            json.dumps(config),
+            seq,
+        )
 
 
 async def record_reported_mode(

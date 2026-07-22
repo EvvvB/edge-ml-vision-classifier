@@ -71,18 +71,18 @@ def _load_states() -> None:
 def cached_desired_state(device_id: str) -> dict[str, Any]:
     _load_states()
     state = _desired_states.get(device_id) or {}
-    return {
+    cached = {
         "mode": state.get("mode") or DEFAULT_DESIRED_STATE["mode"],
         "seq": int(state.get("seq") or 0),
     }
+    config = state.get("config")
+    if isinstance(config, dict):
+        cached["config"] = config
+        cached["config_seq"] = int(state.get("config_seq") or 0)
+    return cached
 
 
-def remember_desired_state(device_id: str, mode: str, seq: int) -> None:
-    _load_states()
-    current = _desired_states.get(device_id)
-    if current and int(current.get("seq") or 0) >= seq:
-        return
-    _desired_states[device_id] = {"mode": mode, "seq": seq}
+def _persist_states() -> None:
     try:
         path = device_state_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,6 +91,30 @@ def remember_desired_state(device_id: str, mode: str, seq: int) -> None:
         )
     except OSError as exc:
         logger.warning("could not persist device states: %s", exc)
+
+
+def remember_desired_state(device_id: str, mode: str, seq: int) -> None:
+    _load_states()
+    current = _desired_states.setdefault(device_id, {})
+    if int(current.get("seq") or 0) >= seq:
+        return
+    current["mode"] = mode
+    current["seq"] = seq
+    _persist_states()
+
+
+def remember_desired_config(
+    device_id: str, config: dict[str, Any], seq: int
+) -> None:
+    # Config versions independently of mode: each has its own seq lane in
+    # the same per-device cache entry.
+    _load_states()
+    current = _desired_states.setdefault(device_id, {})
+    if int(current.get("config_seq") or 0) >= seq:
+        return
+    current["config"] = config
+    current["config_seq"] = seq
+    _persist_states()
 
 
 # ---------------------------------------------------------
@@ -136,22 +160,33 @@ async def handle_hello(
             mode = body.get("mode") or DEFAULT_DESIRED_STATE["mode"]
             seq = int(body.get("seq") or 0)
             remember_desired_state(device_id, mode, seq)
-            return {
+            answer = {
                 "ok": True,
                 "mode": mode,
                 "seq": seq,
                 "server_time": body.get("server_time") or now_iso(),
             }
+            config = body.get("config")
+            if isinstance(config, dict):
+                config_seq = int(body.get("config_seq") or 0)
+                remember_desired_config(device_id, config, config_seq)
+                answer["config"] = config
+                answer["config_seq"] = config_seq
+            return answer
 
     state = cached_desired_state(device_id)
     # The Pi keeps NTP time, so its clock is a fine stand-in for the
     # cloud's when answering from cache.
-    return {
+    answer = {
         "ok": True,
         "mode": state["mode"],
         "seq": state["seq"],
         "server_time": now_iso(),
     }
+    if "config" in state:
+        answer["config"] = state["config"]
+        answer["config_seq"] = state["config_seq"]
+    return answer
 
 
 def _schedule_hello_retry(device_id: str, payload: dict[str, Any]) -> None:
@@ -187,6 +222,12 @@ async def _retry_hello(device_id: str, payload: dict[str, Any]) -> None:
             body.get("mode") or DEFAULT_DESIRED_STATE["mode"],
             int(body.get("seq") or 0),
         )
+        if isinstance(body.get("config"), dict):
+            remember_desired_config(
+                device_id,
+                body["config"],
+                int(body.get("config_seq") or 0),
+            )
         logger.info("hello for %s reached the cloud", device_id)
         return
 
@@ -284,6 +325,108 @@ async def _relay_mode_ack(device_id: str, mode: str, seq: int) -> None:
             return
         except Exception as exc:
             logger.warning("mode-ack relay failed for %s: %s", device_id, exc)
+            await asyncio.sleep(delay)
+            delay *= 2
+
+
+# ---------------------------------------------------------
+# Desired-config push (UDP, retried until acked)
+# ---------------------------------------------------------
+#
+# Same seq/ack machinery as modes, in its own lane: a config datagram
+# carries the full desired-config JSON, so re-sends and reordering are
+# harmless and the newest seq always wins on the device.
+
+_config_acked_seqs: dict[str, int] = {}
+_config_push_tasks: dict[str, asyncio.Task] = {}
+
+
+def send_config_datagram(
+    device_id: str, config: dict[str, Any], seq: int
+) -> bool:
+    host = resolve_device_host(device_id)
+    if not host:
+        logger.warning(
+            "config %s pending but no address is known for %s yet",
+            seq,
+            device_id,
+        )
+        return False
+
+    payload = f"config:{seq}:{json.dumps(config)}".encode("utf-8")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(payload, (host, settings.nicla_udp_port))
+    except OSError as exc:
+        logger.warning("config datagram send failed: %s", exc)
+        return False
+    finally:
+        sock.close()
+    return True
+
+
+def apply_desired_config(
+    device_id: str, config: dict[str, Any], seq: int
+) -> None:
+    """Adopt a desired config seen on the SSE stream and push until acked."""
+    remember_desired_config(device_id, config, seq)
+    if _config_acked_seqs.get(device_id, 0) >= seq:
+        return
+
+    existing = _config_push_tasks.get(device_id)
+    if existing is not None and not existing.done():
+        existing.cancel()
+    _config_push_tasks[device_id] = asyncio.create_task(
+        _push_config_until_acked(device_id, config, seq)
+    )
+
+
+async def _push_config_until_acked(
+    device_id: str, config: dict[str, Any], seq: int
+) -> None:
+    delay = settings.mode_push_retry_base_seconds
+    while _config_acked_seqs.get(device_id, 0) < seq:
+        send_config_datagram(device_id, config, seq)
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, settings.mode_push_retry_max_seconds)
+    logger.info("config %s acked by %s", seq, device_id)
+
+
+async def handle_config_ack(
+    device_id: str,
+    config: dict[str, Any],
+    seq: int,
+    client_host: str | None,
+) -> dict[str, Any]:
+    if client_host:
+        remember_device_address(device_id, client_host)
+    _config_acked_seqs[device_id] = max(
+        _config_acked_seqs.get(device_id, 0), seq
+    )
+    asyncio.create_task(_relay_config_ack(device_id, config, seq))
+    return {"ok": True}
+
+
+async def _relay_config_ack(
+    device_id: str, config: dict[str, Any], seq: int
+) -> None:
+    if not settings.cloud_api_url:
+        return
+    delay = 2.0
+    for attempt in range(4):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    cloud_url(f"/devices/{device_id}/config-ack"),
+                    json={"config": config, "seq": seq},
+                    headers=cloud_headers(),
+                )
+                response.raise_for_status()
+            return
+        except Exception as exc:
+            logger.warning(
+                "config-ack relay failed for %s: %s", device_id, exc
+            )
             await asyncio.sleep(delay)
             delay *= 2
 

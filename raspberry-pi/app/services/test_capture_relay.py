@@ -47,6 +47,23 @@ def test_parses_mode_fields_when_present() -> None:
     assert events[1] == {"counter": 5}
 
 
+def test_parses_config_fields_when_present() -> None:
+    lines = [
+        'data: {"counter": 5, "config": {"crop_size": 192}, "config_seq": 3}',
+        "",
+        'data: {"counter": 5, "config": "not-an-object", "config_seq": 4}',
+        "",
+    ]
+    events = collect_events(lines)
+    assert events[0] == {
+        "counter": 5,
+        "config": {"crop_size": 192},
+        "config_seq": 3,
+    }
+    # A malformed config is dropped; the counter still comes through.
+    assert events[1] == {"counter": 5}
+
+
 def test_ignores_malformed_event_data() -> None:
     lines = [
         "data: not json",

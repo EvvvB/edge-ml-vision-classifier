@@ -11,9 +11,11 @@ from app.services.device_service import (
     handle_device_hello,
     list_devices,
     receive_preview_frame,
+    record_device_config_ack,
     record_device_mode_ack,
     record_device_seen,
     remove_device,
+    set_device_config,
     set_device_mode,
 )
 
@@ -77,6 +79,35 @@ async def mode_ack(request: Request, device_id: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         payload = {}
     return await record_device_mode_ack(
+        request.app.state.db, device_id, payload
+    )
+
+
+@router.post(
+    "/devices/{device_id}/config",
+    dependencies=[Depends(require_api_key)],
+)
+async def set_config(request: Request, device_id: str) -> dict[str, Any]:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        payload = {}
+    return await set_device_config(
+        request.app.state.db,
+        request.app.state.capture_broadcaster,
+        device_id,
+        payload,
+    )
+
+
+@router.post(
+    "/devices/{device_id}/config-ack",
+    dependencies=[Depends(require_api_key)],
+)
+async def config_ack(request: Request, device_id: str) -> dict[str, Any]:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        payload = {}
+    return await record_device_config_ack(
         request.app.state.db, device_id, payload
     )
 

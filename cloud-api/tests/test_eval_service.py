@@ -178,6 +178,21 @@ def test_build_eval_row_skips_when_yolo_never_ran(dog_settings) -> None:
     assert "yolo_detections" in row["skip_reason"]
 
 
+def test_build_eval_row_skips_motion_only_captures(dog_settings) -> None:
+    # model_enabled False means FOMO never ran; an empty fomo_detections
+    # there is absence of inference, not absence of dogs.
+    row = build_eval_row(
+        upload_metadata(model_enabled=False, inference_mode="motion_only")
+    )
+    assert row["status"] == "skipped"
+    assert "fomo did not run" in row["skip_reason"]
+
+    # The stamp alone is enough even if model_enabled is missing (older
+    # metadata shape).
+    row = build_eval_row(upload_metadata(inference_mode="reference_frame"))
+    assert row["status"] == "skipped"
+
+
 def test_build_eval_row_skips_failed_inference(dog_settings) -> None:
     row = build_eval_row(
         upload_metadata(inference_status="failed", yolo_detections=[])

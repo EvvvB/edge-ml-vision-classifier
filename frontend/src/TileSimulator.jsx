@@ -219,9 +219,18 @@ export default function TileSimulator({ imageId, metadata }) {
   if (!(frameWidth > 0 && frameHeight > 0)) return null
 
   // In idle mode no inference ran, so there is nothing to replicate.
-  if (metadata.inference_mode === 'idle') return null
+  // Reference frames (model off, sweep timer) are whole-frame uploads
+  // with no ROIs either.
+  if (
+    metadata.inference_mode === 'idle' ||
+    metadata.inference_mode === 'reference_frame'
+  ) {
+    return null
+  }
 
-  const isMotionCrops = metadata.inference_mode === 'motion_crops'
+  const isMotionCrops =
+    metadata.inference_mode === 'motion_crops' ||
+    metadata.inference_mode === 'motion_only'
   const columns = Number(metadata.grid_columns) || DEFAULT_GRID_COLUMNS
   const rows = Number(metadata.grid_rows) || DEFAULT_GRID_ROWS
 

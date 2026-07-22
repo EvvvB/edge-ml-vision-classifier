@@ -6,7 +6,11 @@ from fastapi import HTTPException
 
 import app.main as main
 from app.services.capture_service import CaptureBroadcaster, sse_event
-from app.services.device_service import PreviewStore, validate_mode
+from app.services.device_service import (
+    PreviewStore,
+    validate_config,
+    validate_mode,
+)
 
 
 def test_validate_mode_accepts_known_modes() -> None:
@@ -21,13 +25,74 @@ def test_validate_mode_rejects_unknown_values(mode) -> None:
     assert error.value.status_code == 400
 
 
+def test_validate_config_accepts_known_knobs() -> None:
+    assert validate_config({"full_sweep_interval_ms": 1_800_000}) == {
+        "full_sweep_interval_ms": 1_800_000
+    }
+    assert validate_config({"crop_size": 192}) == {"crop_size": 192}
+    assert validate_config(
+        {"full_sweep_interval_ms": 5_000, "crop_size": 96}
+    ) == {"full_sweep_interval_ms": 5_000, "crop_size": 96}
+    assert validate_config({"motion_diff_threshold": 16}) == {
+        "motion_diff_threshold": 16
+    }
+    # min_confidence normalizes to float so 0 and 0.0 round-trip the same.
+    assert validate_config({"min_confidence": 0}) == {"min_confidence": 0.0}
+    assert validate_config({"min_confidence": 0.35}) == {
+        "min_confidence": 0.35
+    }
+    assert validate_config(
+        {"model_enabled": False, "min_confidence": 1}
+    ) == {"model_enabled": False, "min_confidence": 1.0}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        "not-a-dict",
+        {"full_sweep_interval_ms": 4_999},
+        {"full_sweep_interval_ms": 24 * 60 * 60 * 1000 + 1},
+        {"full_sweep_interval_ms": "5000"},
+        {"full_sweep_interval_ms": True},
+        {"crop_size": 128},
+        {"crop_size": "96"},
+        {"minimum_confidence": 0.5},
+        {"motion_diff_threshold": 4},
+        {"motion_diff_threshold": 129},
+        {"motion_diff_threshold": 24.5},
+        {"motion_diff_threshold": True},
+        {"min_confidence": -0.1},
+        {"min_confidence": 1.5},
+        {"min_confidence": "0.35"},
+        {"min_confidence": True},
+        {"model_enabled": "false"},
+        {"model_enabled": 0},
+    ],
+)
+def test_validate_config_rejects_bad_payloads(payload) -> None:
+    with pytest.raises(HTTPException) as error:
+        validate_config(payload)
+    assert error.value.status_code == 400
+
+
 def test_sse_event_carries_counter_and_mode() -> None:
-    event = sse_event("nicla-vision-01", 7, "positioning", 3)
+    event = sse_event("nicla-vision-01", 7, "positioning", 3, None, 0)
     assert event.startswith("data: ")
     assert '"counter": 7' in event
     assert '"mode": "positioning"' in event
     assert '"mode_seq": 3' in event
+    assert '"config"' not in event
     assert event.endswith("\n\n")
+
+
+def test_sse_event_carries_config_when_set() -> None:
+    event = sse_event(
+        "nicla-vision-01", 7, "automated", 0, {"crop_size": 192}, 2
+    )
+    assert '"config": {"crop_size": 192}' in event
+    assert '"config_seq": 2' in event
 
 
 def test_broadcaster_tracks_subscribers() -> None:
@@ -132,6 +197,16 @@ async def test_device_endpoints_validate_and_authenticate(monkeypatch) -> None:
                 json={"mode": "automated", "seq": "not-a-number"},
                 headers=headers,
             )
+            bad_config = await client.post(
+                "/devices/nicla-vision-01/config",
+                json={"config": {"crop_size": 128}},
+                headers=headers,
+            )
+            bad_config_ack = await client.post(
+                "/devices/nicla-vision-01/config-ack",
+                json={"config": "not-an-object", "seq": 1},
+                headers=headers,
+            )
             empty_preview = await client.post(
                 "/devices/nicla-vision-01/preview",
                 content=b"",
@@ -146,6 +221,9 @@ async def test_device_endpoints_validate_and_authenticate(monkeypatch) -> None:
     assert bad_mode.status_code == 400
     assert "mode must be one of" in bad_mode.json()["detail"]
     assert bad_ack_seq.status_code == 400
+    assert bad_config.status_code == 400
+    assert "crop_size" in bad_config.json()["detail"]
+    assert bad_config_ack.status_code == 400
     assert empty_preview.status_code == 400
     assert missing_preview.status_code == 404
 
@@ -199,6 +277,8 @@ async def test_hello_returns_mode_and_server_time(monkeypatch) -> None:
             "device_id": "nicla-vision-01",
             "desired_mode": "positioning",
             "desired_mode_seq": 4,
+            "desired_config": {"crop_size": 192},
+            "desired_config_seq": 2,
         }
     )
     monkeypatch.setattr(device_service, "upsert_device_hello", upsert)
@@ -223,6 +303,8 @@ async def test_hello_returns_mode_and_server_time(monkeypatch) -> None:
     body = response.json()
     assert body["mode"] == "positioning"
     assert body["seq"] == 4
+    assert body["config"] == {"crop_size": 192}
+    assert body["config_seq"] == 2
     assert "server_time" in body
     kwargs = upsert.await_args.kwargs
     assert kwargs["device_id"] == "nicla-vision-01"

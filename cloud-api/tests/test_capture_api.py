@@ -48,6 +48,11 @@ def patch_stream_state(monkeypatch, mode="automated", mode_seq=0) -> None:
         "fetch_desired_mode",
         AsyncMock(return_value=(mode, mode_seq)),
     )
+    monkeypatch.setattr(
+        capture_service,
+        "fetch_desired_config",
+        AsyncMock(return_value=(None, 0)),
+    )
 
 
 # httpx's ASGITransport buffers whole response bodies, so an endless SSE
@@ -120,6 +125,11 @@ async def test_capture_stream_emits_on_mode_change(monkeypatch) -> None:
         "fetch_desired_mode",
         AsyncMock(side_effect=lambda pool, device_id: next(modes)),
     )
+    monkeypatch.setattr(
+        capture_service,
+        "fetch_desired_config",
+        AsyncMock(return_value=(None, 0)),
+    )
     monkeypatch.setattr(capture_service, "HEARTBEAT_SECONDS", 0.05)
 
     broadcaster = capture_service.CaptureBroadcaster()
@@ -136,6 +146,55 @@ async def test_capture_stream_emits_on_mode_change(monkeypatch) -> None:
     payload = json.loads(second[len("data:") :])
     assert payload["mode"] == "positioning"
     assert payload["mode_seq"] == 1
+
+
+@pytest.mark.asyncio
+async def test_capture_stream_emits_on_config_change(monkeypatch) -> None:
+    monkeypatch.setattr(
+        capture_service,
+        "fetch_capture_counter",
+        AsyncMock(return_value=5),
+    )
+    monkeypatch.setattr(
+        capture_service,
+        "expire_stale_positioning",
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        capture_service,
+        "fetch_desired_mode",
+        AsyncMock(return_value=("automated", 0)),
+    )
+    configs = iter(
+        [
+            (None, 0),
+            ({"full_sweep_interval_ms": 1_800_000, "crop_size": 192}, 1),
+        ]
+    )
+    monkeypatch.setattr(
+        capture_service,
+        "fetch_desired_config",
+        AsyncMock(side_effect=lambda pool, device_id: next(configs)),
+    )
+    monkeypatch.setattr(capture_service, "HEARTBEAT_SECONDS", 0.05)
+
+    broadcaster = capture_service.CaptureBroadcaster()
+    stream = capture_service.capture_event_stream(
+        Mock(), broadcaster, "nicla-vision-01"
+    )
+
+    first = await anext(stream)
+    # Counter and mode seq are unchanged, so this event must be driven by
+    # the config seq alone.
+    second = await asyncio.wait_for(anext(stream), timeout=5)
+
+    assert "config" not in json.loads(first[len("data:") :])
+    payload = json.loads(second[len("data:") :])
+    assert payload["config"] == {
+        "full_sweep_interval_ms": 1_800_000,
+        "crop_size": 192,
+    }
+    assert payload["config_seq"] == 1
 
 
 @pytest.mark.asyncio

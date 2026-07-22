@@ -118,10 +118,11 @@ async def send_capture_trigger(counter: int) -> bool:
 
 
 def parse_capture_event(data_lines: list[str]) -> dict | None:
-    """Parse one SSE event's data into {counter, mode, mode_seq}.
+    """Parse one SSE event's data into {counter, mode, mode_seq, config,
+    config_seq}.
 
-    counter is required; mode fields are optional so the parser keeps
-    working against a cloud API that predates modes.
+    counter is required; mode and config fields are optional so the parser
+    keeps working against a cloud API that predates them.
     """
     if not data_lines:
         return None
@@ -139,6 +140,15 @@ def parse_capture_event(data_lines: list[str]) -> dict | None:
             event["mode_seq"] = int(mode_seq)
         except (ValueError, TypeError):
             event.pop("mode", None)
+
+    config = payload.get("config")
+    config_seq = payload.get("config_seq")
+    if isinstance(config, dict) and config_seq is not None:
+        try:
+            event["config"] = config
+            event["config_seq"] = int(config_seq)
+        except (ValueError, TypeError):
+            event.pop("config", None)
     return event
 
 
@@ -173,7 +183,10 @@ async def capture_stream_worker() -> None:
     """
     # Imported here because device_gateway imports this module for the
     # address registry.
-    from app.services.device_gateway import apply_desired_mode
+    from app.services.device_gateway import (
+        apply_desired_config,
+        apply_desired_mode,
+    )
     stream_url = (
         settings.cloud_api_url.rstrip("/")
         + f"/devices/{settings.capture_device_id}/capture/stream"
@@ -205,6 +218,12 @@ async def capture_stream_worker() -> None:
                                 settings.capture_device_id,
                                 event["mode"],
                                 event["mode_seq"],
+                            )
+                        if "config" in event:
+                            apply_desired_config(
+                                settings.capture_device_id,
+                                event["config"],
+                                event["config_seq"],
                             )
                         counter = event["counter"]
                         if last_relayed is None:

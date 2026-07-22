@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.config import settings
 from app.services.device_gateway import (
+    handle_config_ack,
     handle_hello,
     handle_mode_ack,
     handle_preview,
@@ -59,6 +60,24 @@ async def device_mode_ack(request: Request) -> dict[str, Any]:
     return await handle_mode_ack(
         required_device_id(payload),
         mode,
+        seq,
+        request.client.host if request.client else None,
+    )
+
+
+@router.post("/config-ack")
+async def device_config_ack(request: Request) -> dict[str, Any]:
+    payload = await json_body(request)
+    try:
+        seq = int(payload.get("seq"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="seq must be an integer") from exc
+    config = payload.get("config")
+    if not isinstance(config, dict):
+        raise HTTPException(status_code=400, detail="config must be an object")
+    return await handle_config_ack(
+        required_device_id(payload),
+        config,
         seq,
         request.client.host if request.client else None,
     )

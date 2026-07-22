@@ -212,7 +212,13 @@ def build_eval_row(metadata: dict[str, Any]) -> dict[str, Any]:
     inference_status = metadata.get("inference_status")
 
     skip_reason: str | None = None
-    if not isinstance(teacher_detections, list):
+    if metadata.get("model_enabled") is False or metadata.get(
+        "inference_mode"
+    ) in ("motion_only", "reference_frame"):
+        # Motion-only captures carry no FOMO output by design; scoring
+        # them would manufacture student misses on every frame.
+        skip_reason = "fomo did not run (motion-only capture)"
+    elif not isinstance(teacher_detections, list):
         skip_reason = "no yolo_detections in metadata"
     elif inference_status not in (None, "complete"):
         skip_reason = f"inference_status is {inference_status!r}"
@@ -431,11 +437,14 @@ def build_teacher_eval_rows(
 ) -> list[dict[str, Any]]:
     """Score both edge models against one teacher's annotations.
 
-    FOMO is always scoreable (its detections rode in with the upload). The
-    Pi YOLO is scored too — that pairing measures what the bigger teacher
-    catches that the live model misses — but only when its inference
-    actually completed.
+    Each edge model is scored only when it actually ran on the frame:
+    FOMO sits out motion-only captures (model_enabled off), and the Pi
+    YOLO sits out uploads whose inference never completed. Scoring a
+    model that never ran would manufacture misses.
     """
+    fomo_ran = metadata.get("model_enabled") is not False and metadata.get(
+        "inference_mode"
+    ) not in ("motion_only", "reference_frame")
     rows = []
     students = [
         (
@@ -443,7 +452,7 @@ def build_teacher_eval_rows(
             metadata.get("fomo_detections"),
             optional_string(metadata.get("model_hash")),
             manifest_version(metadata.get("model_manifest")),
-            True,
+            fomo_ran,
         ),
         (
             TEACHER_SOURCE,

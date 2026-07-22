@@ -10,6 +10,7 @@ from app.config import settings
 from app.storage.postgres import (
     expire_stale_positioning,
     fetch_capture_counter,
+    fetch_desired_config,
     fetch_desired_mode,
     increment_capture_counter,
 )
@@ -79,22 +80,30 @@ async def request_capture(
     return {"device_id": device_id, "counter": counter}
 
 
-def sse_event(device_id: str, counter: int, mode: str, mode_seq: int) -> str:
-    payload = json.dumps(
-        {
-            "device_id": device_id,
-            "counter": counter,
-            "mode": mode,
-            "mode_seq": mode_seq,
-        }
-    )
-    return f"data: {payload}\n\n"
+def sse_event(
+    device_id: str,
+    counter: int,
+    mode: str,
+    mode_seq: int,
+    config: dict | None,
+    config_seq: int,
+) -> str:
+    payload = {
+        "device_id": device_id,
+        "counter": counter,
+        "mode": mode,
+        "mode_seq": mode_seq,
+    }
+    if config is not None:
+        payload["config"] = config
+        payload["config_seq"] = config_seq
+    return f"data: {json.dumps(payload)}\n\n"
 
 
 async def read_stream_state(
     pool: asyncpg.Pool,
     device_id: str,
-) -> tuple[int, str, int]:
+) -> tuple[int, str, int, dict | None, int]:
     # TTL expiry has no HTTP trigger of its own, so this read path (hit at
     # least every heartbeat) is what notices a lapsed positioning mode and
     # turns it into a pushed change.
@@ -103,7 +112,8 @@ async def read_stream_state(
     )
     counter = await fetch_capture_counter(pool, device_id)
     mode, mode_seq = await fetch_desired_mode(pool, device_id)
-    return counter, mode, mode_seq
+    config, config_seq = await fetch_desired_config(pool, device_id)
+    return counter, mode, mode_seq, config, config_seq
 
 
 async def capture_event_stream(
@@ -111,29 +121,38 @@ async def capture_event_stream(
     broadcaster: CaptureBroadcaster,
     device_id: str,
 ) -> AsyncIterator[str]:
-    """SSE stream of the device's capture counter and desired mode.
+    """SSE stream of the device's capture counter, desired mode, and
+    desired config.
 
     The first event is a snapshot so a reconnecting client can re-baseline
-    the counter and converge on the current desired mode; afterwards an
-    event is sent whenever either advances.
+    the counter and converge on the current desired state; afterwards an
+    event is sent whenever any of the three advances.
     """
     broadcaster.subscribe(device_id)
     try:
-        last_counter, last_mode, last_mode_seq = await read_stream_state(
-            pool, device_id
+        state = await read_stream_state(pool, device_id)
+        last_counter, last_mode_seq, last_config_seq = (
+            state[0],
+            state[2],
+            state[4],
         )
-        yield sse_event(device_id, last_counter, last_mode, last_mode_seq)
+        yield sse_event(device_id, *state)
 
         while True:
             await broadcaster.wait_for_change(
                 device_id, timeout=HEARTBEAT_SECONDS
             )
-            counter, mode, mode_seq = await read_stream_state(pool, device_id)
-            if counter > last_counter or mode_seq > last_mode_seq:
+            state = await read_stream_state(pool, device_id)
+            counter, mode_seq, config_seq = state[0], state[2], state[4]
+            if (
+                counter > last_counter
+                or mode_seq > last_mode_seq
+                or config_seq > last_config_seq
+            ):
                 last_counter = counter
-                last_mode = mode
                 last_mode_seq = mode_seq
-                yield sse_event(device_id, counter, mode, mode_seq)
+                last_config_seq = config_seq
+                yield sse_event(device_id, *state)
             else:
                 yield ": keepalive\n\n"
     finally:

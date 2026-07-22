@@ -62,6 +62,15 @@ export function setDeviceMode(deviceId, mode) {
   })
 }
 
+// config is a partial object of known knobs (full_sweep_interval_ms,
+// crop_size); the server merges it into the device's desired config.
+export function setDeviceConfig(deviceId, config) {
+  return apiFetch(`/devices/${encodeURIComponent(deviceId)}/config`, {
+    method: 'POST',
+    body: { config },
+  })
+}
+
 export function deleteDevice(deviceId) {
   return apiFetch(`/devices/${encodeURIComponent(deviceId)}`, {
     method: 'DELETE',
