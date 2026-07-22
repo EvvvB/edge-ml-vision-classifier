@@ -1,6 +1,12 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { apiFetch, detectionImageUrl, exportDownloadUrl } from './api.js'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  apiFetch,
+  deleteDetection,
+  deleteDetections,
+  detectionImageUrl,
+  exportDownloadUrl,
+} from './api.js'
 import DeviceManager from './DeviceManager.jsx'
 import DevicesPanel, { isPositioning, presenceOf } from './DevicesPanel.jsx'
 import EvalView from './EvalPanel.jsx'
@@ -13,6 +19,14 @@ const PAGE_SIZE = 24
 const POLL_INTERVAL_MS = 30_000
 const DEVICES_POLL_INTERVAL_MS = 10_000
 
+// datetime-local values are local wall-clock time; the API wants instants,
+// so convert through Date to a UTC ISO string.
+function isoParam(value) {
+  if (!value) return undefined
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString()
+}
+
 function filterParams(filters) {
   return {
     device_id: filters.deviceId || undefined,
@@ -20,6 +34,8 @@ function filterParams(filters) {
     models: filters.models.length > 0 ? filters.models.join(',') : undefined,
     detections: filters.detections !== 'any' ? filters.detections : undefined,
     source: filters.source !== 'any' ? filters.source : undefined,
+    since: isoParam(filters.since),
+    until: isoParam(filters.until),
   }
 }
 
@@ -73,9 +89,11 @@ function formatTimestamp(value) {
 }
 
 export default function Dashboard({ onAuthError, onLock }) {
+  const queryClient = useQueryClient()
   const [filters, setFilters] = useState(filtersFromUrl)
   const [selected, setSelected] = useState(null)
   const [view, setView] = useState('detections')
+  const [deleting, setDeleting] = useState(false)
   const {
     data,
     error,
@@ -123,6 +141,45 @@ export default function Dashboard({ onAuthError, onLock }) {
   const filterByModelFromDevices = (hash) => {
     toggleModelFilter(hash)
     setView('detections')
+  }
+
+  const refreshAfterDelete = () => {
+    queryClient.invalidateQueries({ queryKey: ['detections'] })
+    queryClient.invalidateQueries({ queryKey: ['facets'] })
+  }
+
+  const handleDeleteError = (err) => {
+    if (err?.status === 401) onAuthError()
+    else window.alert(`Delete failed: ${err.message}`)
+  }
+
+  const deleteSelected = async () => {
+    if (!window.confirm('Delete this detection and its image? This cannot be undone.')) {
+      return
+    }
+    try {
+      await deleteDetection(selected.image_id)
+      setSelected(null)
+      refreshAfterDelete()
+    } catch (err) {
+      handleDeleteError(err)
+    }
+  }
+
+  const deleteFiltered = async () => {
+    const message = `Delete all ${total} matching detection${
+      total === 1 ? '' : 's'
+    } and their images? This cannot be undone.`
+    if (!window.confirm(message)) return
+    setDeleting(true)
+    try {
+      await deleteDetections(filterParams(filters))
+      refreshAfterDelete()
+    } catch (err) {
+      handleDeleteError(err)
+    } finally {
+      setDeleting(false)
+    }
   }
 
   // The eval view knows only image ids; fetch the full record so the
@@ -231,6 +288,8 @@ export default function Dashboard({ onAuthError, onLock }) {
           onChange={setFilters}
           total={total}
           exportUrl={exportDownloadUrl(filterParams(filters))}
+          onDeleteFiltered={deleteFiltered}
+          deleting={deleting}
         />
 
         <main className="dashboard-main">
@@ -281,6 +340,7 @@ export default function Dashboard({ onAuthError, onLock }) {
           key={selected.image_id}
           detection={selected}
           onClose={() => setSelected(null)}
+          onDelete={deleteSelected}
         />
       )}
     </div>
@@ -482,7 +542,7 @@ function RoiMarker({ roi, index, frameWidth, unit }) {
   )
 }
 
-function DetectionModal({ detection, onClose }) {
+function DetectionModal({ detection, onClose, onDelete }) {
   const metadata = detection.metadata ?? {}
   const isMotionCrops = metadata.inference_mode === 'motion_crops'
 
@@ -521,9 +581,14 @@ function DetectionModal({ detection, onClose }) {
       <div className="modal" onClick={(event) => event.stopPropagation()}>
         <div className="modal-header">
           <h2>{detection.device_id ?? 'unknown device'}</h2>
-          <button type="button" className="ghost" onClick={onClose}>
-            Close
-          </button>
+          <div className="modal-actions">
+            <button type="button" className="ghost danger" onClick={onDelete}>
+              Delete
+            </button>
+            <button type="button" className="ghost" onClick={onClose}>
+              Close
+            </button>
+          </div>
         </div>
         {canOverlay && (hasAnyBoxes || rois.length > 0) && (
           <div className="overlay-toggles">

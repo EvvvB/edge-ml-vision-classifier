@@ -9,6 +9,8 @@ from app.services.detection_service import (
     parse_metadata,
     parse_model_filters,
     parse_optional_datetime,
+    parse_time_range,
+    remove_detections,
     safe_image_suffix,
 )
 
@@ -30,6 +32,46 @@ def test_parse_optional_datetime_accepts_utc_z_suffix() -> None:
     result = parse_optional_datetime("2026-07-08T12:30:00Z")
     assert result is not None
     assert result.tzinfo == timezone.utc
+
+
+def test_parse_time_range_parses_both_bounds() -> None:
+    since, until = parse_time_range("2026-07-20T00:00:00Z", "2026-07-21T00:00:00Z")
+    assert since is not None and until is not None
+    assert since < until
+    assert parse_time_range(None, None) == (None, None)
+
+
+def test_parse_time_range_rejects_inverted_bounds() -> None:
+    with pytest.raises(HTTPException) as error:
+        parse_time_range("2026-07-21T00:00:00Z", "2026-07-20T00:00:00Z")
+    assert error.value.status_code == 400
+
+
+def test_parse_time_range_names_the_bad_field() -> None:
+    with pytest.raises(HTTPException) as error:
+        parse_time_range(None, "not-a-date")
+    assert error.value.status_code == 400
+    assert "until" in error.value.detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["any", "fomo"])
+async def test_remove_detections_refuses_unrestrictive_filters(source: str) -> None:
+    # A source filter alone matches everything, so it must not authorize a
+    # bulk delete. The guard fires before db/s3 are touched.
+    with pytest.raises(HTTPException) as error:
+        await remove_detections(
+            None,
+            s3_client=None,
+            device_id=None,
+            labels=None,
+            models=None,
+            detections="any",
+            source=source,
+            since=None,
+            until=None,
+        )
+    assert error.value.status_code == 400
 
 
 def test_parse_model_filters_normalizes() -> None:

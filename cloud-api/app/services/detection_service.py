@@ -16,6 +16,8 @@ from fastapi import HTTPException, Response, UploadFile
 from app.config import settings
 from app.services.eval_service import record_image_eval
 from app.storage.postgres import (
+    delete_detection,
+    delete_detections,
     fetch_detection,
     fetch_detection_facets,
     fetch_detections,
@@ -24,7 +26,7 @@ from app.storage.postgres import (
     mark_detection_stored,
     touch_device_upload,
 )
-from app.storage.s3 import download_image, upload_image
+from app.storage.s3 import delete_images, download_image, upload_image
 
 # Images are keyed by UUID and never rewritten, so clients may cache them
 # forever without revalidating.
@@ -245,6 +247,20 @@ def validate_filter_value(name: str, value: str, allowed: frozenset[str]) -> str
     return value
 
 
+def parse_time_range(
+    since: str | None,
+    until: str | None,
+) -> tuple[datetime | None, datetime | None]:
+    parsed_since = parse_optional_datetime(since, field="since")
+    parsed_until = parse_optional_datetime(until, field="until")
+    if parsed_since and parsed_until and parsed_since > parsed_until:
+        raise HTTPException(
+            status_code=400,
+            detail="since must not be later than until",
+        )
+    return parsed_since, parsed_until
+
+
 async def list_detections(
     db: asyncpg.Pool,
     device_id: str | None,
@@ -252,6 +268,8 @@ async def list_detections(
     models: str | None,
     detections: str,
     source: str,
+    since: str | None,
+    until: str | None,
     limit: int,
     offset: int,
 ) -> dict[str, Any]:
@@ -264,6 +282,7 @@ async def list_detections(
         )
     validate_filter_value("detections", detections, VALID_DETECTION_FILTERS)
     validate_filter_value("source", source, VALID_SOURCE_FILTERS)
+    parsed_since, parsed_until = parse_time_range(since, until)
 
     rows, total = await fetch_detections(
         db,
@@ -272,6 +291,8 @@ async def list_detections(
         models=parse_model_filters(models),
         detections=detections,
         source=source,
+        since=parsed_since,
+        until=parsed_until,
         limit=limit,
         offset=offset,
     )
@@ -360,9 +381,12 @@ async def export_detections(
     models: str | None,
     detections: str,
     source: str,
+    since: str | None,
+    until: str | None,
 ) -> Response:
     validate_filter_value("detections", detections, VALID_DETECTION_FILTERS)
     validate_filter_value("source", source, VALID_SOURCE_FILTERS)
+    parsed_since, parsed_until = parse_time_range(since, until)
 
     rows, total = await fetch_detections(
         db,
@@ -371,6 +395,8 @@ async def export_detections(
         models=parse_model_filters(models),
         detections=detections,
         source=source,
+        since=parsed_since,
+        until=parsed_until,
         limit=EXPORT_MAX_IMAGES + 1,
         offset=0,
     )
@@ -426,6 +452,8 @@ async def export_detections(
                         "models": parse_model_filters(models),
                         "detections": detections,
                         "source": source,
+                        "since": since,
+                        "until": until,
                     },
                     "matched": total,
                     "exported_images": len(exported),
@@ -442,6 +470,89 @@ async def export_detections(
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+async def remove_detection(
+    db: asyncpg.Pool,
+    s3_client: Any,
+    image_id: UUID,
+) -> dict[str, Any]:
+    deleted = await delete_detection(db, image_id=image_id)
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="detection not found")
+    await cleanup_s3_objects(s3_client, [deleted])
+    return {"ok": True, "deleted": 1}
+
+
+async def remove_detections(
+    db: asyncpg.Pool,
+    s3_client: Any,
+    device_id: str | None,
+    labels: str | None,
+    models: str | None,
+    detections: str,
+    source: str,
+    since: str | None,
+    until: str | None,
+) -> dict[str, Any]:
+    validate_filter_value("detections", detections, VALID_DETECTION_FILTERS)
+    validate_filter_value("source", source, VALID_SOURCE_FILTERS)
+    parsed_labels = parse_label_filters(labels)
+    parsed_models = parse_model_filters(models)
+    parsed_since, parsed_until = parse_time_range(since, until)
+
+    # A source filter alone constrains nothing (it only scopes the other
+    # filters), so this condition matches exactly when the WHERE clause
+    # would be empty — i.e. the request would wipe the whole table.
+    restrictive = any(
+        [
+            device_id,
+            parsed_labels,
+            parsed_models,
+            detections != "any",
+            parsed_since,
+            parsed_until,
+        ]
+    )
+    if not restrictive:
+        raise HTTPException(
+            status_code=400,
+            detail="refusing to delete all detections; apply at least one filter",
+        )
+
+    deleted = await delete_detections(
+        db,
+        device_id=device_id,
+        labels=parsed_labels,
+        models=parsed_models,
+        detections=detections,
+        source=source,
+        since=parsed_since,
+        until=parsed_until,
+    )
+    await cleanup_s3_objects(s3_client, deleted)
+    return {"ok": True, "deleted": len(deleted)}
+
+
+async def cleanup_s3_objects(
+    s3_client: Any,
+    rows: list[dict[str, Any]],
+) -> None:
+    """Best-effort removal of deleted detections' images.
+
+    The DB rows are already gone, so a failed S3 delete must not fail the
+    request — an orphaned object is only storage cost, and resurrecting
+    the rows is not possible anyway.
+    """
+    by_bucket: dict[str, list[str]] = {}
+    for row in rows:
+        if row.get("s3_bucket") and row.get("s3_key"):
+            by_bucket.setdefault(row["s3_bucket"], []).append(row["s3_key"])
+    for bucket, keys in by_bucket.items():
+        try:
+            await delete_images(s3_client=s3_client, bucket=bucket, keys=keys)
+        except Exception:
+            pass
 
 
 def parse_metadata(raw_metadata: str) -> dict[str, Any]:
@@ -501,11 +612,14 @@ def optional_string(value: Any) -> str | None:
     return str(value)
 
 
-def parse_optional_datetime(value: Any) -> datetime | None:
+def parse_optional_datetime(
+    value: Any,
+    field: str = "captured_at",
+) -> datetime | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise HTTPException(status_code=400, detail="captured_at must be a string")
+        raise HTTPException(status_code=400, detail=f"{field} must be a string")
 
     normalized = value.replace("Z", "+00:00")
     try:
@@ -513,5 +627,5 @@ def parse_optional_datetime(value: Any) -> datetime | None:
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail="captured_at must be an ISO 8601 datetime",
+            detail=f"{field} must be an ISO 8601 datetime",
         ) from exc

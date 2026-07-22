@@ -1,4 +1,9 @@
-import { DEFAULT_FILTERS, isDefaultFilters } from './filterState.js'
+import { useEffect, useRef, useState } from 'react'
+import {
+  DEFAULT_FILTERS,
+  isDefaultFilters,
+  isRestrictiveFilters,
+} from './filterState.js'
 import Sparkline from './Sparkline.jsx'
 
 function RadioGroup({ name, value, options, onChange }) {
@@ -22,6 +27,38 @@ function RadioGroup({ name, value, options, onChange }) {
   )
 }
 
+// Sections start collapsed so the sidebar stays short; a section with an
+// active filter starts open (and pops open if a filter lands in it from
+// elsewhere, e.g. the Devices tab), so a collapsed header can never hide
+// what is narrowing the grid — at minimum the badge says so.
+function FilterGroup({ title, badge, children }) {
+  const [open, setOpen] = useState(() => Boolean(badge))
+  const prevBadge = useRef(badge)
+
+  useEffect(() => {
+    if (badge && !prevBadge.current) setOpen(true)
+    prevBadge.current = badge
+  }, [badge])
+
+  return (
+    <div className="filter-group">
+      <button
+        type="button"
+        className="filter-group-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span>{title}</span>
+        {!open && badge && <span className="filter-badge">{badge}</span>}
+        <span className="filter-chevron" aria-hidden="true">
+          ▸
+        </span>
+      </button>
+      {open && <div className="filter-group-body">{children}</div>}
+    </div>
+  )
+}
+
 const EXPORT_MAX_IMAGES = 1000
 
 export default function FilterSidebar({
@@ -30,6 +67,8 @@ export default function FilterSidebar({
   onChange,
   total,
   exportUrl,
+  onDeleteFiltered,
+  deleting,
 }) {
   const set = (patch) => onChange({ ...filters, ...patch })
 
@@ -71,8 +110,16 @@ export default function FilterSidebar({
     <aside className="filters">
       <Sparkline timeline={facets?.timeline} />
 
-      <div className="filter-group">
-        <h3>Detections</h3>
+      <FilterGroup
+        title="Detections"
+        badge={
+          filters.detections !== 'any'
+            ? filters.detections === 'some'
+              ? 'has'
+              : 'none'
+            : null
+        }
+      >
         <RadioGroup
           name="detections"
           value={filters.detections}
@@ -83,10 +130,12 @@ export default function FilterSidebar({
             { value: 'none', label: 'None', count: facets?.none },
           ]}
         />
-      </div>
+      </FilterGroup>
 
-      <div className="filter-group">
-        <h3>Model</h3>
+      <FilterGroup
+        title="Model"
+        badge={filters.source !== 'any' ? filters.source.toUpperCase() : null}
+      >
         <RadioGroup
           name="source"
           value={filters.source}
@@ -97,10 +146,12 @@ export default function FilterSidebar({
             { value: 'yolo', label: 'YOLO' },
           ]}
         />
-      </div>
+      </FilterGroup>
 
-      <div className="filter-group">
-        <h3>Model version</h3>
+      <FilterGroup
+        title="Model version"
+        badge={filters.models.length > 0 ? String(filters.models.length) : null}
+      >
         {modelEntries.length === 0 && (
           <p className="filter-empty">No stamped models yet</p>
         )}
@@ -124,10 +175,12 @@ export default function FilterSidebar({
             </label>
           ))}
         </div>
-      </div>
+      </FilterGroup>
 
-      <div className="filter-group">
-        <h3>Labels</h3>
+      <FilterGroup
+        title="Labels"
+        badge={filters.labels.length > 0 ? String(filters.labels.length) : null}
+      >
         {labelEntries.length === 0 && (
           <p className="filter-empty">No labels yet</p>
         )}
@@ -144,10 +197,9 @@ export default function FilterSidebar({
             </label>
           ))}
         </div>
-      </div>
+      </FilterGroup>
 
-      <div className="filter-group">
-        <h3>Device</h3>
+      <FilterGroup title="Device" badge={filters.deviceId || null}>
         <select
           value={filters.deviceId}
           onChange={(event) => set({ deviceId: event.target.value })}
@@ -162,7 +214,29 @@ export default function FilterSidebar({
               </option>
             ))}
         </select>
-      </div>
+      </FilterGroup>
+
+      <FilterGroup
+        title="Time range"
+        badge={filters.since || filters.until ? 'set' : null}
+      >
+        <label className="filter-datetime">
+          <span>From</span>
+          <input
+            type="datetime-local"
+            value={filters.since}
+            onChange={(event) => set({ since: event.target.value })}
+          />
+        </label>
+        <label className="filter-datetime">
+          <span>To</span>
+          <input
+            type="datetime-local"
+            value={filters.until}
+            onChange={(event) => set({ until: event.target.value })}
+          />
+        </label>
+      </FilterGroup>
 
       {!isDefaultFilters(filters) && (
         <button
@@ -174,8 +248,7 @@ export default function FilterSidebar({
         </button>
       )}
 
-      <div className="filter-group">
-        <h3>Export</h3>
+      <FilterGroup title="Export">
         {total !== undefined && total > EXPORT_MAX_IMAGES ? (
           <p className="filter-empty">
             {total} results — narrow the filters to at most {EXPORT_MAX_IMAGES}{' '}
@@ -197,7 +270,32 @@ export default function FilterSidebar({
           </a>
         )}
         <p className="filter-hint">Images + FOMO/YOLO COCO annotations</p>
-      </div>
+      </FilterGroup>
+
+      <FilterGroup title="Delete">
+        {isRestrictiveFilters(filters) ? (
+          <>
+            <button
+              type="button"
+              className="delete-button"
+              disabled={!total || deleting}
+              onClick={onDeleteFiltered}
+            >
+              {deleting
+                ? 'Deleting…'
+                : `Delete${total !== undefined ? ` (${total})` : ''}`}
+            </button>
+            <p className="filter-hint">
+              Removes every matching detection and its image
+            </p>
+          </>
+        ) : (
+          <p className="filter-hint">
+            Narrow the results first — e.g. pick a time range — to delete
+            what matches.
+          </p>
+        )}
+      </FilterGroup>
     </aside>
   )
 }

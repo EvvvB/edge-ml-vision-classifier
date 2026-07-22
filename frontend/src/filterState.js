@@ -4,6 +4,8 @@ export const DEFAULT_FILTERS = {
   labels: [],
   models: [],
   deviceId: '',
+  since: '',
+  until: '',
 }
 
 function listFromParam(value) {
@@ -11,6 +13,13 @@ function listFromParam(value) {
     .split(',')
     .map((entry) => entry.trim().toLowerCase())
     .filter(Boolean)
+}
+
+// since/until hold the raw datetime-local input value ("2026-07-22T14:30",
+// local time); anything unparseable is treated as unset.
+function datetimeFromParam(value) {
+  if (!value || Number.isNaN(new Date(value).getTime())) return ''
+  return value
 }
 
 export function filtersFromUrl() {
@@ -23,6 +32,8 @@ export function filtersFromUrl() {
     labels: listFromParam(params.get('labels')),
     models: listFromParam(params.get('models')),
     deviceId: params.get('device') || '',
+    since: datetimeFromParam(params.get('since')),
+    until: datetimeFromParam(params.get('until')),
   }
 }
 
@@ -33,6 +44,8 @@ export function syncFiltersToUrl(filters) {
   if (filters.labels.length > 0) params.set('labels', filters.labels.join(','))
   if (filters.models.length > 0) params.set('models', filters.models.join(','))
   if (filters.deviceId) params.set('device', filters.deviceId)
+  if (filters.since) params.set('since', filters.since)
+  if (filters.until) params.set('until', filters.until)
   const query = params.toString()
   window.history.replaceState(
     null,
@@ -47,6 +60,22 @@ export function isDefaultFilters(filters) {
     filters.source === 'any' &&
     filters.labels.length === 0 &&
     filters.models.length === 0 &&
-    !filters.deviceId
+    !filters.deviceId &&
+    !filters.since &&
+    !filters.until
+  )
+}
+
+// Whether the filters actually narrow the result set. A source filter alone
+// does not (it only scopes what the other filters look at), and the API
+// refuses a bulk delete that would match everything.
+export function isRestrictiveFilters(filters) {
+  return (
+    filters.detections !== 'any' ||
+    filters.labels.length > 0 ||
+    filters.models.length > 0 ||
+    Boolean(filters.deviceId) ||
+    Boolean(filters.since) ||
+    Boolean(filters.until)
   )
 }

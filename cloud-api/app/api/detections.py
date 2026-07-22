@@ -25,6 +25,8 @@ from app.services.detection_service import (
     get_detection_image,
     list_detections,
     receive_detection_upload,
+    remove_detection,
+    remove_detections,
 )
 from app.config import settings
 from app.storage.postgres import check_db
@@ -96,6 +98,8 @@ async def export_detections_route(
     models: str | None = None,
     detections: str = "any",
     source: str = "any",
+    since: str | None = None,
+    until: str | None = None,
 ) -> Response:
     return await export_detections(
         request.app.state.db,
@@ -105,6 +109,8 @@ async def export_detections_route(
         models=models,
         detections=detections,
         source=source,
+        since=since,
+        until=until,
     )
 
 
@@ -152,6 +158,8 @@ async def read_detections(
     models: str | None = None,
     detections: str = "any",
     source: str = "any",
+    since: str | None = None,
+    until: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -162,8 +170,46 @@ async def read_detections(
         models=models,
         detections=detections,
         source=source,
+        since=since,
+        until=until,
         limit=limit,
         offset=offset,
+    )
+
+
+# Bulk delete takes the same filters as the list endpoint, so "delete what
+# I'm looking at" is exactly the current dashboard selection. The service
+# refuses an unfiltered delete.
+@router.delete("/detections", dependencies=[Depends(require_api_key)])
+async def delete_detections_route(
+    request: Request,
+    device_id: str | None = None,
+    labels: str | None = None,
+    models: str | None = None,
+    detections: str = "any",
+    source: str = "any",
+    since: str | None = None,
+    until: str | None = None,
+) -> dict[str, Any]:
+    return await remove_detections(
+        request.app.state.db,
+        s3_client=request.app.state.s3_client,
+        device_id=device_id,
+        labels=labels,
+        models=models,
+        detections=detections,
+        source=source,
+        since=since,
+        until=until,
+    )
+
+
+@router.delete("/detections/{image_id}", dependencies=[Depends(require_api_key)])
+async def delete_detection_route(request: Request, image_id: UUID) -> dict[str, Any]:
+    return await remove_detection(
+        request.app.state.db,
+        s3_client=request.app.state.s3_client,
+        image_id=image_id,
     )
 
 

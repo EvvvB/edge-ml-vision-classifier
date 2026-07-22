@@ -314,6 +314,11 @@ def detection_array(source: str) -> str:
     return f"coalesce(metadata->'{source}_detections', '[]'::jsonb)"
 
 
+# Time filters and ordering use the timestamp the dashboard displays:
+# capture time when the device reported one, arrival time otherwise.
+DISPLAY_TIMESTAMP = "coalesce(captured_at, created_at)"
+
+
 def build_detection_filters(
     *,
     device_id: str | None,
@@ -321,6 +326,8 @@ def build_detection_filters(
     models: list[str],
     detections: str,
     source: str,
+    since: datetime | None,
+    until: datetime | None,
     params: list[Any],
 ) -> str:
     """Append filter params to `params` and return a WHERE clause (or '')."""
@@ -330,6 +337,14 @@ def build_detection_filters(
     if device_id is not None:
         params.append(device_id)
         clauses.append(f"device_id = ${len(params)}")
+
+    if since is not None:
+        params.append(since)
+        clauses.append(f"{DISPLAY_TIMESTAMP} >= ${len(params)}")
+
+    if until is not None:
+        params.append(until)
+        clauses.append(f"{DISPLAY_TIMESTAMP} <= ${len(params)}")
 
     if detections == "some":
         clauses.append(
@@ -386,6 +401,8 @@ async def fetch_detections(
     models: list[str],
     detections: str,
     source: str,
+    since: datetime | None,
+    until: datetime | None,
     limit: int,
     offset: int,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -396,6 +413,8 @@ async def fetch_detections(
         models=models,
         detections=detections,
         source=source,
+        since=since,
+        until=until,
         params=params,
     )
 
@@ -416,6 +435,64 @@ async def fetch_detections(
             offset,
         )
     return [serialize_row(row) for row in rows], total
+
+
+async def delete_detection(
+    pool: asyncpg.Pool,
+    *,
+    image_id: UUID,
+) -> dict[str, Any] | None:
+    """Delete one detection row; returns its S3 location, or None if absent.
+
+    eval_results and teacher_annotations rows go with it via ON DELETE
+    CASCADE; the S3 object is the caller's to clean up.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            DELETE FROM detections
+            WHERE image_id = $1
+            RETURNING s3_bucket, s3_key
+            """,
+            image_id,
+        )
+    return dict(row) if row else None
+
+
+async def delete_detections(
+    pool: asyncpg.Pool,
+    *,
+    device_id: str | None,
+    labels: list[str],
+    models: list[str],
+    detections: str,
+    source: str,
+    since: datetime | None,
+    until: datetime | None,
+) -> list[dict[str, Any]]:
+    """Delete every detection matching the filters; returns S3 locations."""
+    params: list[Any] = []
+    where = build_detection_filters(
+        device_id=device_id,
+        labels=labels,
+        models=models,
+        detections=detections,
+        source=source,
+        since=since,
+        until=until,
+        params=params,
+    )
+    # Backstop against wiping the table: the service validates that the
+    # filters are restrictive, but this function must never run unfiltered.
+    if not where:
+        raise ValueError("refusing to delete detections without filters")
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"DELETE FROM detections{where} RETURNING s3_bucket, s3_key",
+            *params,
+        )
+    return [dict(row) for row in rows]
 
 
 async def fetch_detection_facets(

@@ -40,6 +40,28 @@ async def download_image(
     }
 
 
+# DeleteObjects accepts at most 1000 keys per request.
+DELETE_BATCH_SIZE = 1000
+
+
+async def delete_images(
+    *,
+    s3_client: Any,
+    bucket: str,
+    keys: list[str],
+) -> None:
+    for start in range(0, len(keys), DELETE_BATCH_SIZE):
+        batch = keys[start : start + DELETE_BATCH_SIZE]
+        await run_in_threadpool(
+            s3_client.delete_objects,
+            Bucket=bucket,
+            Delete={
+                "Objects": [{"Key": key} for key in batch],
+                "Quiet": True,
+            },
+        )
+
+
 async def upload_image(
     *,
     s3_client: Any,

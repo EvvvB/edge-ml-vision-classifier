@@ -68,6 +68,18 @@ export function deleteDevice(deviceId) {
   })
 }
 
+export function deleteDetection(imageId) {
+  return apiFetch(`/detections/${encodeURIComponent(imageId)}`, {
+    method: 'DELETE',
+  })
+}
+
+// Deletes everything matching the given filter params (same shape as the
+// list endpoint's); the API refuses an unfiltered delete.
+export function deleteDetections(params) {
+  return apiFetch('/detections', { method: 'DELETE', params })
+}
+
 // Preview frames render in an <img>, so the key rides as a query parameter
 // like the detection images.
 export function previewImageUrl(deviceId) {
