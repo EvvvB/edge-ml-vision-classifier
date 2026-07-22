@@ -11,6 +11,7 @@ import DeviceManager from './DeviceManager.jsx'
 import DevicesPanel, { isPositioning, presenceOf } from './DevicesPanel.jsx'
 import EvalView from './EvalPanel.jsx'
 import FilterSidebar from './Filters.jsx'
+import ReceiptsPanel from './ReceiptsPanel.jsx'
 import TileSimulator, { inferenceRois } from './TileSimulator.jsx'
 import { filtersFromUrl, syncFiltersToUrl } from './filterState.js'
 import { isLocalEnvironment } from './env.js'
@@ -204,6 +205,7 @@ export default function Dashboard({ onAuthError, onLock }) {
           {[
             ['detections', 'Detections'],
             ['eval', 'Eval'],
+            ['receipts', 'Receipts'],
           ].map(([value, label]) => (
             <button
               key={value}
@@ -253,6 +255,8 @@ export default function Dashboard({ onAuthError, onLock }) {
       )}
 
       {view === 'eval' && <EvalView onSelectImage={openImage} />}
+
+      {view === 'receipts' && <ReceiptsPanel devices={devices} />}
 
       <div
         className="dashboard-view"

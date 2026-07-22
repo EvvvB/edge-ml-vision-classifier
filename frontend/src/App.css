@@ -1006,3 +1006,47 @@ button.ghost:hover {
   overflow-x: auto;
   font-size: 13px;
 }
+
+/* --- Receipts panel --- */
+
+.receipts-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.receipts-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.receipt-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.receipt-filters select {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* Rejection reasons and image ids are the one column worth wrapping;
+   everything else stays nowrap like the device table. */
+.device-table td.receipt-detail {
+  white-space: normal;
+  min-width: 18ch;
+  max-width: 40ch;
+  color: var(--text-dim);
+}
+
+.receipt-source {
+  color: var(--text-dim);
+}
